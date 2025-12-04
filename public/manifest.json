@@ -1,0 +1,27 @@
+{
+  "name": "Canton Wallet",
+  "short_name": "Canton",
+  "description": "Multi-chain crypto wallet with Canton Network support",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f23",
+  "theme_color": "#8b5cf6",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192 512x512 1000x1000",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "scope": "/",
+  "lang": "en"
+}
