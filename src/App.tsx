@@ -9,6 +9,18 @@ import * as solSigner from './solSigner';
 import * as tronSigner from './tronSigner';
 import * as tonSigner from './tonSigner';
 import Wallet from './components/Wallet';
+import {
+  ShieldCheck,
+  Users,
+  Building2,
+  KeyRound,
+  Package,
+  Globe,
+  LayoutGrid,
+  Settings,
+  LogOut
+} from 'lucide-react';
+import './themes/index.css';
 import './App.css';
 
 // PRF salt - consistent for all users
@@ -35,6 +47,7 @@ interface Asset {
   chain?: string;
   chainType?: string;
   chains?: AssetChain[];  // All chains this asset is available on
+  chainBalances?: Record<string, number>;  // Per-chain balance breakdown (e.g., { "Ethereum": 100, "Base": 50 })
   isCustom?: boolean;  // True for user-added custom assets
 }
 
@@ -57,12 +70,31 @@ interface ChainAddress {
 }
 
 interface Transaction {
-  transactionId: string;
-  timestamp: string;
-  type: 'send' | 'receive';
-  amount: number;
-  from: string;
-  to: string;
+  id: string;
+  txHash: string | null;
+  type: string;
+  status: string;
+  asset: string;
+  chain: string;
+  chainType: string;
+  amount: string;
+  amountUsd: string | null;
+  fee: string | null;
+  feeAsset: string | null;
+  from: string | null;
+  to: string | null;
+  description: string | null;
+  metadata: Record<string, any> | null;
+  blockNumber: number | null;
+  blockTimestamp: string | null;
+  createdAt: string;
+}
+
+interface TransactionPagination {
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 interface WalletAddress {
@@ -126,6 +158,13 @@ interface ApiResponse<T = any> {
   error?: string;
 }
 
+interface TransactionsApiResponse {
+  success: boolean;
+  data?: Transaction[];
+  pagination?: TransactionPagination;
+  error?: string;
+}
+
 interface DbUser {
   id: string;
   username: string;
@@ -137,10 +176,19 @@ interface DbUser {
 
 const API_BASE = window.location.origin;
 
+// Snap-to-grid helper (20px grid)
+const SNAP_GRID = 20;
+const snap = (value: number, grid: number) => Math.round(value / grid) * grid;
+
+// LocalStorage key for app window state persistence
+const STORAGE_KEY = 'wallet-app-window-state';
+
 function App() {
   // Path-based view detection
   const [currentView, setCurrentView] = useState<'wallet' | 'admin'>(() => {
-    return window.location.pathname === '/admin' ? 'admin' : 'wallet';
+    const path = window.location.pathname.toLowerCase().replace(/\/$/, ''); // normalize path
+    if (path.startsWith('/admin')) return 'admin';
+    return 'wallet';
   });
 
   // Auth state
@@ -154,6 +202,7 @@ function App() {
 
   // Wallet state
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [transactionPagination, setTransactionPagination] = useState<TransactionPagination | null>(null);
   const [, setWalletInfo] = useState<WalletInfo | null>(null);
   const [transferOffers, setTransferOffers] = useState<TransferOffer[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -187,12 +236,34 @@ function App() {
   });
   const [addAssetError, setAddAssetError] = useState('');
 
+  // Settings / Passkey management
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [passkeys, setPasskeys] = useState<Array<{ id: string; name: string; deviceType: string; backedUp: boolean; transports: string[]; createdAt: string }>>([]);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
+  const [deletingPasskeyId, setDeletingPasskeyId] = useState<string | null>(null);
+  const [addingPasskey, setAddingPasskey] = useState(false);
+  const [newPasskeyName, setNewPasskeyName] = useState('');
+
   // Dock state
   const [dockVisible, setDockVisible] = useState(false);
   const [activeApp, setActiveApp] = useState<string | null>(null);
   const [hoveredApp, setHoveredApp] = useState<string | null>(null);
   // Track which apps have active sessions (opened but not closed)
-  const [openAppSessions, setOpenAppSessions] = useState<Set<string>>(new Set());
+  const [openAppSessions, setOpenAppSessions] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('wallet-app-window-state');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed.openAppSessions)) {
+          return new Set<string>(parsed.openAppSessions);
+        }
+      }
+    } catch {}
+    return new Set<string>();
+  });
+  // Track package installation status per app: 'checking' | 'installing' | 'ready' | 'error' | null
+  const [appPackageStatus, setAppPackageStatus] = useState<Record<string, { status: string; message?: string }>>({});
 
   // Dock apps configuration - loaded from API
   const [dockApps, setDockApps] = useState<Array<{ id: string; name: string; icon: string; color: string; url: string | null }>>([]);
@@ -200,7 +271,132 @@ function App() {
 
   // Wallet Bridge for iframe communication
   const walletBridgeRef = useRef<WalletBridge | null>(null);
+  const loadingWalletRef = useRef(false); // Prevent concurrent loadWalletData calls
+  const lastLoadTimeRef = useRef(0); // Throttle repeated calls
+  const initialLoadDoneRef = useRef(false); // Track if initial load completed
   const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+
+  // Floating app window state: per-app position, size, and mode
+  const [floatingApps, setFloatingApps] = useState<Record<string, { floating: boolean; x: number; y: number; width: number; height: number }>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.floatingApps || {};
+      }
+    } catch {}
+    return {};
+  });
+  const [focusedApp, setFocusedApp] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.focusedApp || null;
+      }
+    } catch {}
+    return null;
+  });
+  const appDragRef = useRef<{ appId: string; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
+  const appResizeRef = useRef<{ appId: string; startX: number; startY: number; startW: number; startH: number } | null>(null);
+
+  const handleAppPointerMove = useCallback((e: MouseEvent | TouchEvent) => {
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+
+    if (appDragRef.current) {
+      e.preventDefault();
+      const { appId, startX, startY, startPosX, startPosY } = appDragRef.current;
+      setFloatingApps(prev => ({
+        ...prev,
+        [appId]: { ...prev[appId], x: snap(clientX - startX + startPosX, SNAP_GRID), y: snap(clientY - startY + startPosY, SNAP_GRID) },
+      }));
+    }
+    if (appResizeRef.current) {
+      e.preventDefault();
+      const { appId, startX, startY, startW, startH } = appResizeRef.current;
+      setFloatingApps(prev => ({
+        ...prev,
+        [appId]: {
+          ...prev[appId],
+          width: snap(Math.max(280, startW + clientX - startX), SNAP_GRID),
+          height: snap(Math.max(300, startH + clientY - startY), SNAP_GRID),
+        },
+      }));
+    }
+  }, []);
+
+  const handleAppPointerUp = useCallback(() => {
+    appDragRef.current = null;
+    appResizeRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const hasFloating = Object.values(floatingApps).some(a => a.floating);
+    if (!hasFloating) return;
+    document.addEventListener('mousemove', handleAppPointerMove);
+    document.addEventListener('mouseup', handleAppPointerUp);
+    document.addEventListener('touchmove', handleAppPointerMove, { passive: false });
+    document.addEventListener('touchend', handleAppPointerUp);
+    return () => {
+      document.removeEventListener('mousemove', handleAppPointerMove);
+      document.removeEventListener('mouseup', handleAppPointerUp);
+      document.removeEventListener('touchmove', handleAppPointerMove);
+      document.removeEventListener('touchend', handleAppPointerUp);
+    };
+  }, [floatingApps, handleAppPointerMove, handleAppPointerUp]);
+
+  // Persist app window state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        openAppSessions: Array.from(openAppSessions),
+        floatingApps,
+        focusedApp,
+      }));
+    } catch {}
+  }, [openAppSessions, floatingApps, focusedApp]);
+
+  const startAppDrag = (appId: string, e: React.MouseEvent | React.TouchEvent) => {
+    const state = floatingApps[appId];
+    if (!state?.floating) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    appDragRef.current = { appId, startX: clientX, startY: clientY, startPosX: state.x, startPosY: state.y };
+  };
+
+  const startAppResize = (appId: string, e: React.MouseEvent | React.TouchEvent) => {
+    e.stopPropagation();
+    const state = floatingApps[appId];
+    if (!state?.floating) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    appResizeRef.current = { appId, startX: clientX, startY: clientY, startW: state.width, startH: state.height };
+  };
+
+  const toggleAppFloating = (appId: string) => {
+    setFloatingApps(prev => {
+      const current = prev[appId];
+      if (current?.floating) {
+        // Return to fullscreen — remove entry
+        const { [appId]: _, ...rest } = prev;
+        return rest;
+      }
+      // Enter floating mode — center on screen (snapped to grid)
+      const width = snap(800, SNAP_GRID);
+      const height = snap(600, SNAP_GRID);
+      return {
+        ...prev,
+        [appId]: {
+          floating: true,
+          x: snap(Math.round((window.innerWidth - width) / 2), SNAP_GRID),
+          y: snap(Math.round((window.innerHeight - height) / 2), SNAP_GRID),
+          width,
+          height,
+        },
+      };
+    });
+  };
 
   // AI Chat state
   const [chatOpen, setChatOpen] = useState(false);
@@ -236,13 +432,87 @@ function App() {
   // Admin panel state
   const [dbUsers, setDbUsers] = useState<DbUser[]>([]);
   const [adminLoading, setAdminLoading] = useState(false);
-  const [adminError, setAdminError] = useState('');
   const [nodeName, setNodeName] = useState<string | null>(null);
-  const [partiesExpanded, setPartiesExpanded] = useState(false);
   const [partiesLoading, setPartiesLoading] = useState(false);
-  const [usersExpanded, setUsersExpanded] = useState(true); // User management expanded by default
-  const [adminToken, setAdminToken] = useState<string | null>(() => localStorage.getItem('adminToken'));
-  const [adminPassword, setAdminPassword] = useState('');
+  const [adminToken] = useState<string | null>(() => localStorage.getItem('adminToken'));
+
+  // Superadmin state
+  interface SuperadminUser {
+    id: string;
+    username: string;
+    displayName: string | null;
+    isSuperadmin: boolean;
+  }
+  interface AdminUserRow {
+    id: string;
+    username: string;
+    displayName: string | null;
+    isSuperadmin: boolean;
+    createdAt: string;
+    updatedAt: string;
+    createdBy: string | null;
+  }
+  interface ConfigData {
+    RP_NAME: string;
+    THEME: string;
+    ORG_NAME: string;
+    DOCK_APPS: string;
+    ALLOWED_IFRAME_ORIGINS: string;
+  }
+  interface RpcEndpointRow {
+    id: string;
+    chain_type: string;
+    chain_name: string;
+    chain_id: string | null;
+    network: string;
+    name: string | null;
+    rpc_url: string;
+    priority: number;
+    is_enabled: number;
+    created_at: string;
+    updated_at: string;
+  }
+  interface AppRow {
+    id: string;
+    name: string;
+    icon: string;
+    color: string;
+    url: string | null;
+    sort_order: number;
+    is_enabled: number;
+    created_at: string;
+    updated_at: string;
+  }
+  const [superadminToken, setSuperadminToken] = useState<string | null>(() => localStorage.getItem('superadminToken'));
+  const [superadminUser, setSuperadminUser] = useState<SuperadminUser | null>(null);
+  const [superadminUsername, setSuperadminUsername] = useState('');
+  const [superadminPassword, setSuperadminPassword] = useState('');
+  const [superadminLoading, setSuperadminLoading] = useState(false);
+  const [superadminError, setSuperadminError] = useState('');
+  const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
+  const [configData, setConfigData] = useState<ConfigData | null>(null);
+  const [configOverriddenKeys, setConfigOverriddenKeys] = useState<string[]>([]);
+  const [showCreateAdminUser, setShowCreateAdminUser] = useState(false);
+  const [newAdminUsername, setNewAdminUsername] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('');
+  const [newAdminDisplayName, setNewAdminDisplayName] = useState('');
+  const [newAdminIsSuperadmin, setNewAdminIsSuperadmin] = useState(false);
+  const [editingConfig, setEditingConfig] = useState(false);
+  const [editConfigData, setEditConfigData] = useState<ConfigData | null>(null);
+  const [superadminSection, setSuperadminSection] = useState<'admin-users' | 'config' | 'users' | 'parties' | 'codes' | 'packages' | 'rpc' | 'apps'>('admin-users');
+  const [adminSidebarCollapsed, setAdminSidebarCollapsed] = useState(false);
+  const [rpcNetworkMode, setRpcNetworkMode] = useState<'mainnet' | 'testnet'>('mainnet');
+  const [rpcEndpoints, setRpcEndpoints] = useState<RpcEndpointRow[]>([]);
+  const [rpcLoading, setRpcLoading] = useState(false);
+  const [showAddRpc, setShowAddRpc] = useState(false);
+  const [editingRpc, setEditingRpc] = useState<RpcEndpointRow | null>(null);
+  const [newRpc, setNewRpc] = useState({ chain_type: 'evm', chain_name: 'Ethereum', chain_id: '1', network: 'mainnet', name: '', rpc_url: '', priority: 0, is_enabled: true });
+  const [availableChains, setAvailableChains] = useState<Array<{ chain: string; chain_type: string; chain_id: string | null; network: string }>>([]);
+  const [appsList, setAppsList] = useState<AppRow[]>([]);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [showAddApp, setShowAddApp] = useState(false);
+  const [editingApp, setEditingApp] = useState<AppRow | null>(null);
+  const [newApp, setNewApp] = useState({ id: '', name: '', icon: '', color: '#6366f1', url: '', sort_order: 0, is_enabled: true });
 
   // Registration codes state
   const [registrationCodes, setRegistrationCodes] = useState<{
@@ -256,12 +526,15 @@ function App() {
     createdAt: string;
     isExpired: boolean;
     isDepleted: boolean;
+    codeType: 'general' | 'reserved_username';
+    reservedUsername: string | null;
   }[]>([]);
-  const [regCodesExpanded, setRegCodesExpanded] = useState(false);
   const [regCodesLoading, setRegCodesLoading] = useState(false);
   const [showCreateCode, setShowCreateCode] = useState(false);
   const [newCodeMaxUses, setNewCodeMaxUses] = useState('10');
   const [newCodeExpiry, setNewCodeExpiry] = useState('');
+  const [newCodeType, setNewCodeType] = useState<'general' | 'reserved_username'>('general');
+  const [newCodeReservedUsername, setNewCodeReservedUsername] = useState('');
   const [createCodeStatus, setCreateCodeStatus] = useState('');
 
   // Registration code validation (for login page)
@@ -273,25 +546,34 @@ function App() {
     valid: boolean;
     reason?: string;
     usesRemaining?: number;
+    codeType?: string;
+    reservedUsername?: string | null;
     checked: boolean;
   }>({ valid: false, checked: false });
 
   // Theme and org state
   const [theme, setTheme] = useState<string>('purple');
   const [orgName, setOrgName] = useState<string>('Canton Wallet');
+  const [networkMode, setNetworkMode] = useState<'mainnet' | 'testnet'>(() => {
+    const saved = localStorage.getItem('walletNetworkMode');
+    return (saved === 'testnet') ? 'testnet' : 'mainnet';
+  });
 
   // DAR upload state
-  const [darExpanded, setDarExpanded] = useState(false);
   const [darUploading, setDarUploading] = useState(false);
   const [darUploadStatus, setDarUploadStatus] = useState('');
   const [packageIds, setPackageIds] = useState<string[]>([]);
   const [packagesLoading, setPackagesLoading] = useState(false);
+  const [showInstallFromUrl, setShowInstallFromUrl] = useState(false);
+  const [darInstallUrl, setDarInstallUrl] = useState('');
 
 
   // Handle browser back/forward navigation
   useEffect(() => {
     const handlePopState = () => {
-      setCurrentView(window.location.pathname === '/admin' ? 'admin' : 'wallet');
+      const path = window.location.pathname.toLowerCase().replace(/\/$/, '');
+      if (path === '/admin') setCurrentView('admin');
+      else setCurrentView('wallet');
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -307,6 +589,13 @@ function App() {
           orgName: string;
           dockApps: Array<{ id: string; name: string; icon: string; color: string; url: string | null }>;
           allowedIframeOrigins: string[];
+          rpcEndpoints?: {
+            evm?: Record<string, string>;
+            btc?: Record<string, string>;
+            svm?: Record<string, string>;
+            tron?: Record<string, string>;
+            ton?: Record<string, string>;
+          };
         }>;
         if (data.success && data.data) {
           if (data.data.theme) setTheme(data.data.theme);
@@ -319,6 +608,15 @@ function App() {
           }
           if (data.data.allowedIframeOrigins) {
             setAllowedIframeOrigins(data.data.allowedIframeOrigins);
+          }
+          // Configure RPC endpoints for signers
+          if (data.data.rpcEndpoints) {
+            const rpc = data.data.rpcEndpoints;
+            if (rpc.evm) evmSigner.setEvmRpcEndpoints(rpc.evm);
+            if (rpc.btc) btcSigner.setBtcRpcEndpoints(rpc.btc);
+            if (rpc.svm) solSigner.setSolRpcEndpoints(rpc.svm);
+            if (rpc.tron) tronSigner.setTronRpcEndpoints(rpc.tron);
+            if (rpc.ton) tonSigner.setTonRpcEndpoints(rpc.ton);
           }
         }
       } catch (error) {
@@ -337,9 +635,9 @@ function App() {
     }
   }, []);
 
-  // Load wallet data when authenticated
+  // Load wallet data when authenticated (only once on initial auth)
   useEffect(() => {
-    if (authUser) {
+    if (authUser && !initialLoadDoneRef.current) {
       loadWalletData();
     }
   }, [authUser]);
@@ -376,20 +674,22 @@ function App() {
       icon: a.icon || null,
       chain: a.chain || '',
       chainType: a.chainType || '',
+      chains: a.chains || [],
+      chainBalances: a.chainBalances || {},
     }));
   }, [assets]);
 
   const getTransactions = useCallback(() => {
     return transactions.map(tx => ({
-      transactionId: tx.transactionId,
+      transactionId: tx.id,
       type: tx.type as 'send' | 'receive',
-      amount: tx.amount,
-      symbol: 'CC', // Default to Canton Coin
-      from: tx.from,
-      to: tx.to,
-      chain: 'canton',
-      timestamp: tx.timestamp,
-      status: 'confirmed' as 'pending' | 'confirmed' | 'failed',
+      amount: parseFloat(tx.amount),
+      symbol: tx.asset,
+      from: tx.from || '',
+      to: tx.to || '',
+      chain: tx.chainType,
+      timestamp: tx.createdAt,
+      status: tx.status as 'pending' | 'confirmed' | 'failed',
     }));
   }, [transactions]);
 
@@ -431,7 +731,7 @@ function App() {
         });
         const data = await response.json() as ApiResponse<{ transactionId: string; status?: string }>;
         if (data.success && data.data) {
-          loadWalletData();
+          loadWalletData(true);
           return { txId: data.data.transactionId, status: data.data.status || 'confirmed' };
         }
         throw new Error(data.error || 'Transfer failed');
@@ -447,16 +747,16 @@ function App() {
         });
         const data = await response.json() as ApiResponse<{ transactionId: string }>;
         if (data.success && data.data) {
-          loadWalletData();
+          loadWalletData(true);
           return { txId: data.data.transactionId, status: 'confirmed' };
         }
         throw new Error(data.error || 'Accept offer failed');
       },
       onRefresh: async () => {
-        await loadWalletData();
+        await loadWalletData(true);
       },
       // Canton Generic Contract Operations
-      onCantonQuery: async (params: { templateId: string; filter?: Record<string, unknown> }) => {
+      onCantonQuery: async (params: { templateId: string; filter?: Record<string, unknown>; readAs?: string[] }) => {
         const response = await fetch(`${API_BASE}/api/canton/query`, {
           method: 'POST',
           headers: {
@@ -500,6 +800,22 @@ function App() {
           return data.data;
         }
         throw new Error(data.error || 'Exercise failed');
+      },
+      // Canton User Rights
+      onGrantUserRights: async (params: { userId: string; rights: Array<{ type: 'actAs' | 'readAs'; party: string } | { type: 'participantAdmin' }> }) => {
+        const response = await fetch(`${API_BASE}/api/canton/grant-rights`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionId}`
+          },
+          body: JSON.stringify(params)
+        });
+        const data = await response.json() as ApiResponse<{ userId: string; grantedRights: typeof params.rights }>;
+        if (data.success && data.data) {
+          return { success: true, userId: data.data.userId, grantedRights: data.data.grantedRights };
+        }
+        throw new Error(data.error || 'Grant rights failed');
       },
       // EVM Transaction Operations - Client-side signing with PRF
       onSignEVMTransaction: async (params: { transaction: { to: string; value?: string; data?: string; chainId: number } }) => {
@@ -963,7 +1279,27 @@ function App() {
       walletBridgeRef.current?.destroy();
       walletBridgeRef.current = null;
     };
-  }, [authUser, sessionId, getUser, getAddresses, getAssets, getTransactions, getTransferOffers, allowedIframeOrigins]);
+  }, [authUser, sessionId, allowedIframeOrigins]); // Only recreate bridge on auth/session/origins change
+
+  // Update getter callbacks when they change (without recreating bridge, preserving registered iframes)
+  useEffect(() => {
+    if (walletBridgeRef.current) {
+      walletBridgeRef.current.updateCallbacks({
+        getUser,
+        getAddresses,
+        getAssets,
+        getTransactions,
+        getTransferOffers,
+      });
+    }
+  }, [getUser, getAddresses, getAssets, getTransactions, getTransferOffers]);
+
+  // Notify iframes when assets change
+  useEffect(() => {
+    if (assets.length > 0 && walletBridgeRef.current) {
+      walletBridgeRef.current.notifyAssetsChanged();
+    }
+  }, [assets]);
 
   // Register iframe when app opens
   const registerAppIframe = useCallback((appId: string, iframe: HTMLIFrameElement | null) => {
@@ -1059,6 +1395,137 @@ function App() {
     } catch (error) {
       console.error('PRF authentication error:', error);
       return null;
+    }
+  };
+
+  // === Passkey Management ===
+  const loadPasskeys = async () => {
+    if (!sessionId) return;
+    setSettingsLoading(true);
+    setSettingsError('');
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/passkeys`, {
+        headers: { 'Authorization': `Bearer ${sessionId}` }
+      });
+      const data = await res.json() as ApiResponse<Array<{ id: string; name: string; deviceType: string; backedUp: boolean; transports: string[]; createdAt: string }>>;
+      if (data.success && data.data) {
+        setPasskeys(data.data);
+      } else {
+        setSettingsError(data.error || 'Failed to load passkeys');
+      }
+    } catch (error) {
+      setSettingsError('Failed to load passkeys');
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const handleAddPasskey = async (passkeyName: string) => {
+    if (!sessionId) return;
+    setAddingPasskey(true);
+    setSettingsError('');
+    try {
+      // Get add-passkey options
+      const optionsRes = await fetch(`${API_BASE}/api/auth/passkey/add-options`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${sessionId}`
+        }
+      });
+      const optionsData = await optionsRes.json() as ApiResponse<{ options: any }>;
+      if (!optionsData.success || !optionsData.data) {
+        throw new Error(optionsData.error || 'Failed to get options');
+      }
+
+      const options = optionsData.data.options;
+
+      // Convert for native WebAuthn API
+      const publicKeyOptions: PublicKeyCredentialCreationOptions = {
+        challenge: base64URLStringToBuffer(options.challenge),
+        rp: options.rp,
+        user: {
+          id: base64URLStringToBuffer(options.user.id),
+          name: options.user.name,
+          displayName: options.user.displayName
+        },
+        pubKeyCredParams: options.pubKeyCredParams,
+        timeout: options.timeout,
+        attestation: options.attestation || 'none',
+        authenticatorSelection: options.authenticatorSelection,
+        excludeCredentials: (options.excludeCredentials || []).map((cred: any) => ({
+          id: base64URLStringToBuffer(cred.id),
+          type: cred.type,
+          transports: cred.transports
+        })),
+      };
+
+      const credential = await navigator.credentials.create({
+        publicKey: publicKeyOptions
+      }) as PublicKeyCredential;
+
+      if (!credential) {
+        throw new Error('Failed to create credential');
+      }
+
+      const response = credential.response as AuthenticatorAttestationResponse;
+
+      const credentialJSON = {
+        id: credential.id,
+        rawId: bufferToBase64URLString(credential.rawId),
+        type: credential.type,
+        response: {
+          clientDataJSON: bufferToBase64URLString(response.clientDataJSON),
+          attestationObject: bufferToBase64URLString(response.attestationObject),
+          transports: response.getTransports?.() || []
+        },
+        clientExtensionResults: {}
+      };
+
+      // Verify
+      const verifyRes = await fetch(`${API_BASE}/api/auth/passkey/add-verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${sessionId}`
+        },
+        body: JSON.stringify({ response: credentialJSON, name: passkeyName || undefined })
+      });
+      const verifyData = await verifyRes.json() as ApiResponse<{ id: string }>;
+      if (!verifyData.success) {
+        throw new Error(verifyData.error || 'Verification failed');
+      }
+
+      setNewPasskeyName('');
+      // Reload passkey list
+      await loadPasskeys();
+    } catch (error: any) {
+      if (error.name !== 'NotAllowedError') {
+        setSettingsError(error.message || 'Failed to add passkey');
+      }
+    } finally {
+      setAddingPasskey(false);
+    }
+  };
+
+  const handleDeletePasskey = async (id: string) => {
+    if (!sessionId) return;
+    setDeletingPasskeyId(id);
+    setSettingsError('');
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/passkeys?id=${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${sessionId}` }
+      });
+      const data = await res.json() as ApiResponse<{ deleted: boolean }>;
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to delete passkey');
+      }
+      await loadPasskeys();
+    } catch (error: any) {
+      setSettingsError(error.message || 'Failed to delete passkey');
+    } finally {
+      setDeletingPasskeyId(null);
     }
   };
 
@@ -1332,16 +1799,27 @@ function App() {
     setAssets([]);
     setTransactions([]);
     setWalletInfo(null);
+    initialLoadDoneRef.current = false; // Reset for next login
   };
+
+  // Helper to get admin auth headers (works with both admin and superadmin tokens)
+  const getAdminHeaders = (): Record<string, string> => {
+    if (adminToken) return { 'X-Admin-Token': adminToken };
+    if (superadminToken) return { 'X-Superadmin-Token': superadminToken };
+    return {};
+  };
+
+  // Check if we have any admin auth
+  const hasAdminAuth = adminToken || superadminToken;
 
   // Fetch canton users (for admin view) - only when dropdown is expanded
   const fetchCantonUsers = async () => {
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     if (cantonUsers.length > 0) return; // Already loaded
     setPartiesLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/auth/users`, {
-        headers: { 'X-Admin-Token': adminToken }
+        headers: getAdminHeaders()
       });
       const data = await res.json() as ApiResponse<CantonUser[]>;
       if (data.success && data.data) {
@@ -1354,52 +1832,55 @@ function App() {
     }
   };
 
-  // Toggle Canton Parties dropdown and fetch if needed
-  const togglePartiesDropdown = () => {
-    const newExpanded = !partiesExpanded;
-    setPartiesExpanded(newExpanded);
-    if (newExpanded && cantonUsers.length === 0) {
-      fetchCantonUsers();
-    }
-  };
-
   // Fetch balances from blockchain RPCs (native tokens and contract tokens)
   const fetchChainBalances = async (
     walletAddresses: Array<{ chainType: string; address: string }>,
-    assetsList: Asset[]
+    assetsList: Asset[],
+    network: 'mainnet' | 'testnet' = 'mainnet'
   ) => {
     const balances: Record<string, number> = {};
+
+    // Network mappings
+    const evmChainId = network === 'mainnet' ? 1 : 11155111; // Ethereum mainnet vs Sepolia
+    const evmBaseChainId = network === 'mainnet' ? 8453 : 11155111; // Base mainnet vs Sepolia
+    const btcNetwork = network === 'mainnet' ? 'mainnet' : 'testnet';
+    const solNetwork = network === 'mainnet' ? 'mainnet' : 'devnet';
+    const tronNetwork = network === 'mainnet' ? 'mainnet' : 'shasta';
+    const tonNetwork = network === 'mainnet' ? 'mainnet' : 'testnet';
 
     // Fetch native token balances
     const nativeBalancePromises = walletAddresses.map(async (wallet) => {
       try {
         switch (wallet.chainType) {
           case 'evm': {
-            // Fetch ETH balance (mainnet)
-            const ethBalance = await evmSigner.getBalance(wallet.address, 1);
+            // Fetch ETH balance on Ethereum
+            const ethBalance = await evmSigner.getBalance(wallet.address, evmChainId);
             balances['ETH'] = Number(ethBalance) / 1e18;
-            // Fetch Base ETH balance
-            const baseBalance = await evmSigner.getBalance(wallet.address, 8453);
-            balances['BASE_ETH'] = Number(baseBalance) / 1e18;
+            balances['ETH_Ethereum'] = Number(ethBalance) / 1e18;
+            // Fetch ETH balance on Base (multi-chain ETH)
+            if (network === 'mainnet') {
+              const baseBalance = await evmSigner.getBalance(wallet.address, evmBaseChainId);
+              balances['ETH_Base'] = Number(baseBalance) / 1e18;
+            }
             break;
           }
           case 'btc': {
-            const btcBalance = await btcSigner.getBalance(wallet.address, 'mainnet');
+            const btcBalance = await btcSigner.getBalance(wallet.address, btcNetwork as 'mainnet' | 'testnet');
             balances['BTC'] = btcBalance / 1e8; // satoshis to BTC
             break;
           }
           case 'svm': {
-            const solBalance = await solSigner.getBalance(wallet.address, 'mainnet');
+            const solBalance = await solSigner.getBalance(wallet.address, solNetwork as 'mainnet' | 'devnet');
             balances['SOL'] = solBalance / 1e9; // lamports to SOL
             break;
           }
           case 'tron': {
-            const trxBalance = await tronSigner.getBalance(wallet.address, 'mainnet');
+            const trxBalance = await tronSigner.getBalance(wallet.address, tronNetwork as 'mainnet' | 'shasta');
             balances['TRX'] = trxBalance / 1e6; // SUN to TRX
             break;
           }
           case 'ton': {
-            const tonBalance = await tonSigner.getBalance(wallet.address, 'mainnet');
+            const tonBalance = await tonSigner.getBalance(wallet.address, tonNetwork as 'mainnet' | 'testnet');
             balances['TON'] = Number(tonBalance) / 1e9; // nanotons to TON
             break;
           }
@@ -1434,8 +1915,10 @@ function App() {
             let tokenBalance = 0n;
 
             if (chain.chainType === 'evm') {
-              // ERC20 token balance
-              const chainId = chain.chain === 'Base' ? 8453 : 1;
+              // ERC20 token balance - use network-appropriate chain ID
+              const chainId = network === 'mainnet'
+                ? (chain.chain === 'Base' ? 8453 : 1)
+                : 11155111; // Sepolia for testnet
               tokenBalance = await evmSigner.getTokenBalance(
                 chain.contractAddress!,
                 wallet.address,
@@ -1446,14 +1929,14 @@ function App() {
               tokenBalance = await solSigner.getTokenBalance(
                 chain.contractAddress!,
                 wallet.address,
-                'mainnet'
+                solNetwork as 'mainnet' | 'devnet'
               );
             } else if (chain.chainType === 'tron') {
               // TRC20 token balance (Tron)
               tokenBalance = await tronSigner.getTokenBalance(
                 chain.contractAddress!,
                 wallet.address,
-                'mainnet'
+                tronNetwork as 'mainnet' | 'shasta'
               );
             }
 
@@ -1469,8 +1952,18 @@ function App() {
     return balances;
   };
 
-  const loadWalletData = async () => {
+  const loadWalletData = async (force = false, networkModeOverride?: 'mainnet' | 'testnet') => {
     if (!authUser) return;
+
+    // Prevent concurrent calls (React StrictMode double-invokes in dev)
+    if (loadingWalletRef.current) return;
+
+    // Throttle: prevent calls within 2 seconds unless forced
+    const now = Date.now();
+    if (!force && now - lastLoadTimeRef.current < 2000) return;
+
+    loadingWalletRef.current = true;
+    lastLoadTimeRef.current = now;
 
     try {
       setLoading(true);
@@ -1490,7 +1983,7 @@ function App() {
       ]);
 
       const balanceData = await balanceRes.json() as ApiResponse<WalletBalance>;
-      const txData = await txRes.json() as ApiResponse<Transaction[]>;
+      const txData = await txRes.json() as TransactionsApiResponse;
       const infoData = await infoRes.json() as ApiResponse<WalletInfo>;
       const assetsConfigData = await assetsRes.json() as ApiResponse<AssetConfig[]>;
       const customAssetsData = await customAssetsRes.json() as ApiResponse<CustomAsset[]>;
@@ -1514,7 +2007,10 @@ function App() {
         // Fallback to hardcoded assets if database is empty
         assetsList = [
           { symbol: 'CC', name: 'Canton Coin', balance: ccBalance, icon: '◈', chain: 'Canton', chainType: 'canton' },
-          { symbol: 'ETH', name: 'Ethereum', balance: 0, icon: 'Ξ', chain: 'Ethereum', chainType: 'evm' },
+          { symbol: 'ETH', name: 'Ethereum', balance: 0, icon: 'Ξ', chain: 'Ethereum', chainType: 'evm', chains: [
+            { chain: 'Ethereum', chainType: 'evm', contractAddress: null, decimals: 18 },
+            { chain: 'Base', chainType: 'evm', contractAddress: null, decimals: 18 }
+          ]},
           { symbol: 'BTC', name: 'Bitcoin', balance: 0, icon: '₿', chain: 'Bitcoin', chainType: 'btc' },
           { symbol: 'SOL', name: 'Solana', balance: 0, icon: '◎', chain: 'Solana', chainType: 'svm' },
           { symbol: 'USDC', name: 'USD Coin', balance: 0, icon: '$', chain: 'Ethereum', chainType: 'evm' },
@@ -1541,10 +2037,17 @@ function App() {
 
       setAssets(assetsList);
 
+      // Notify iframe apps that assets have changed
+      walletBridgeRef.current?.notifyAssetsChanged();
+
       if (txData.success && txData.data) {
         setTransactions(txData.data);
+        if (txData.pagination) {
+          setTransactionPagination(txData.pagination);
+        }
       } else {
         setTransactions([]);
+        setTransactionPagination(null);
       }
 
       if (infoData.success && infoData.data) {
@@ -1581,25 +2084,29 @@ function App() {
 
         // Fetch real balances from blockchain RPCs
         if (infoData.data.walletAddresses && infoData.data.walletAddresses.length > 0) {
-          const chainBalances = await fetchChainBalances(infoData.data.walletAddresses, assetsList);
+          const chainBalances = await fetchChainBalances(infoData.data.walletAddresses, assetsList, networkModeOverride || networkMode);
 
           // Update asset balances with RPC data
           setAssets(prevAssets => prevAssets.map(asset => {
             let newBalance = asset.balance;
+            const perChainBalances: Record<string, number> = {};
 
-            // Check for multi-chain token balances (e.g., USDC_Ethereum, USDC_Base)
+            // Check for multi-chain token balances (e.g., USDC_Ethereum, USDC_Base, ETH_Ethereum, ETH_Base)
             if (asset.chains && asset.chains.length > 1) {
               // Sum up balances across all chains for multi-chain assets
               let totalBalance = 0;
+              let foundChainBalances = false;
               for (const chain of asset.chains) {
                 const chainKey = `${asset.symbol}_${chain.chain}`;
                 if (chainBalances[chainKey] !== undefined) {
+                  perChainBalances[chain.chain] = chainBalances[chainKey];
                   totalBalance += chainBalances[chainKey];
+                  foundChainBalances = true;
                 }
               }
-              // Also check for native balance key
-              if (chainBalances[asset.symbol] !== undefined) {
-                totalBalance += chainBalances[asset.symbol];
+              // Only fall back to native balance key if no per-chain balances found
+              if (!foundChainBalances && chainBalances[asset.symbol] !== undefined) {
+                totalBalance = chainBalances[asset.symbol];
               }
               if (totalBalance > 0) {
                 newBalance = totalBalance;
@@ -1608,10 +2115,18 @@ function App() {
               // Single-chain asset - check direct symbol match
               if (chainBalances[asset.symbol] !== undefined) {
                 newBalance = chainBalances[asset.symbol];
+                // Store single chain balance
+                if (asset.chain) {
+                  perChainBalances[asset.chain] = chainBalances[asset.symbol];
+                }
               }
             }
 
-            return { ...asset, balance: newBalance };
+            return {
+              ...asset,
+              balance: newBalance,
+              chainBalances: Object.keys(perChainBalances).length > 0 ? perChainBalances : undefined
+            };
           }));
         }
       }
@@ -1643,7 +2158,7 @@ function App() {
           fetch(`${API_BASE}/api/wallet/transactions`, { headers })
         ]);
         const newBalanceData = await newBalanceRes.json() as ApiResponse<WalletBalance>;
-        const newTxData = await newTxRes.json() as ApiResponse<Transaction[]>;
+        const newTxData = await newTxRes.json() as TransactionsApiResponse;
         if (newBalanceData.success && newBalanceData.data) {
           // Update CC balance in assets
           setAssets(prev => prev.map(a =>
@@ -1652,9 +2167,37 @@ function App() {
         }
         if (newTxData.success && newTxData.data) {
           setTransactions(newTxData.data);
+          if (newTxData.pagination) {
+            setTransactionPagination(newTxData.pagination);
+          }
         }
       } else {
         setTransferOffers([]);
+      }
+      // Sync transactions from external chains in background (non-blocking)
+      // Only sync on manual refresh (force=true), not on initial load
+      if (force) {
+        fetch(`${API_BASE}/api/wallet/sync-transactions`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ network: networkModeOverride || networkMode })
+        }).then(async (syncRes) => {
+          if (syncRes.ok) {
+            const syncData = await syncRes.json() as { success: boolean; data?: { totalRecorded: number } };
+            if (syncData.success && syncData.data?.totalRecorded && syncData.data.totalRecorded > 0) {
+              console.log(`Synced ${syncData.data.totalRecorded} new transactions from external chains`);
+              // Refresh transactions after sync
+              const refreshRes = await fetch(`${API_BASE}/api/wallet/transactions`, { headers });
+              const refreshData = await refreshRes.json() as TransactionsApiResponse;
+              if (refreshData.success && refreshData.data) {
+                setTransactions(refreshData.data);
+                if (refreshData.pagination) {
+                  setTransactionPagination(refreshData.pagination);
+                }
+              }
+            }
+          }
+        }).catch(err => console.warn('Transaction sync failed:', err));
       }
     } catch (error) {
       console.error('Error loading wallet data:', error);
@@ -1664,6 +2207,8 @@ function App() {
       setChainAddresses([]);
     } finally {
       setLoading(false);
+      loadingWalletRef.current = false;
+      initialLoadDoneRef.current = true; // Mark initial load as complete
     }
   };
 
@@ -1682,7 +2227,7 @@ function App() {
 
       const data = await response.json() as ApiResponse;
       if (data.success) {
-        loadWalletData();
+        loadWalletData(true);
       } else {
         console.error('Error accepting offer:', data.error);
       }
@@ -1734,7 +2279,7 @@ function App() {
           contractAddress: '',
           decimals: 18
         });
-        loadWalletData();
+        loadWalletData(true);
       } else {
         setAddAssetError(data.error || 'Failed to add asset');
       }
@@ -1758,7 +2303,7 @@ function App() {
 
       const data = await response.json() as ApiResponse;
       if (data.success) {
-        loadWalletData();
+        loadWalletData(true);
       }
     } catch (error) {
       console.error('Failed to delete custom asset:', error);
@@ -1767,7 +2312,7 @@ function App() {
 
   const handleCreateParty = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     setCreateUserStatus('Creating party...');
 
     try {
@@ -1775,7 +2320,7 @@ function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Token': adminToken
+          ...getAdminHeaders()
         },
         body: JSON.stringify({
           username: newUsername,
@@ -1845,13 +2390,11 @@ function App() {
 
   // Admin functions (require admin token)
   const fetchDbUsers = async () => {
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     setAdminLoading(true);
-    setAdminError('');
+    setSuperadminError('');
     try {
-      const res = await fetch(`${API_BASE}/api/admin/db-users`, {
-        headers: { 'X-Admin-Token': adminToken }
-      });
+      const res = await fetch(`${API_BASE}/api/admin/db-users`, { headers: getAdminHeaders() });
       const data = await res.json() as ApiResponse<DbUser[]> & { nodeName?: string };
       if (data.success && data.data) {
         setDbUsers(data.data);
@@ -1859,94 +2402,73 @@ function App() {
           setNodeName(data.nodeName);
         }
       } else {
-        setAdminError(data.error || 'Failed to fetch users');
+        setSuperadminError(data.error || 'Failed to fetch users');
       }
     } catch (error) {
-      setAdminError('Failed to fetch users');
+      setSuperadminError('Failed to fetch users');
       console.error('Error fetching db users:', error);
     } finally {
       setAdminLoading(false);
     }
   };
 
-  const handleUpdateUserRole = async (userId: string, newRole: string) => {
-    if (!adminToken) return;
-    try {
-      const res = await fetch(`${API_BASE}/api/admin/db-users/${userId}/role`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Admin-Token': adminToken
-        },
-        body: JSON.stringify({ role: newRole })
-      });
-      const data = await res.json() as ApiResponse;
-      if (data.success) {
-        await fetchDbUsers();
-      } else {
-        setAdminError(data.error || 'Failed to update role');
-      }
-    } catch (error) {
-      setAdminError('Failed to update role');
-      console.error('Error updating role:', error);
-    }
-  };
 
   const handleDeleteUser = async (userId: string) => {
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     if (!confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
       return;
     }
     try {
       const res = await fetch(`${API_BASE}/api/admin/db-users/${userId}`, {
         method: 'DELETE',
-        headers: { 'X-Admin-Token': adminToken }
+        headers: getAdminHeaders()
       });
       const data = await res.json() as ApiResponse;
       if (data.success) {
         await fetchDbUsers();
       } else {
-        setAdminError(data.error || 'Failed to delete user');
+        setSuperadminError(data.error || 'Failed to delete user');
       }
     } catch (error) {
-      setAdminError('Failed to delete user');
+      setSuperadminError('Failed to delete user');
       console.error('Error deleting user:', error);
     }
   };
 
   const handleAdminTapFaucet = async (username: string) => {
-    if (!adminToken) return;
-    setAdminError('');
+    if (!hasAdminAuth) return;
+    const setError = superadminToken ? setSuperadminError : setSuperadminError;
+    setError('');
     try {
       const res = await fetch(`${API_BASE}/api/wallet/tap`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Wallet-User': username,
-          'X-Admin-Token': adminToken
+          ...getAdminHeaders()
         },
         body: JSON.stringify({ amount: '100.0' })
       });
       const data = await res.json() as ApiResponse;
       if (data.success) {
-        setAdminError(`Faucet tapped! 100 CC added to ${username}`);
-        setTimeout(() => setAdminError(''), 3000);
+        setError(`Faucet tapped! 100 CC added to ${username}`);
+        setTimeout(() => setError(''), 3000);
       } else {
-        setAdminError(`Faucet error: ${data.error}`);
+        setError(`Faucet error: ${data.error}`);
       }
     } catch (error) {
-      setAdminError(`Faucet error: ${error}`);
+      setError(`Faucet error: ${error}`);
       console.error('Error tapping faucet:', error);
     }
   };
 
   // Registration codes functions
   const fetchRegistrationCodes = async () => {
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     setRegCodesLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/admin/registration-codes`, {
-        headers: { 'X-Admin-Token': adminToken }
+        headers: getAdminHeaders()
       });
       const data = await res.json() as ApiResponse<typeof registrationCodes>;
       if (data.success && data.data) {
@@ -1961,18 +2483,20 @@ function App() {
 
   const handleCreateCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     setCreateCodeStatus('');
     try {
       const res = await fetch(`${API_BASE}/api/admin/registration-codes`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Token': adminToken
+          ...getAdminHeaders()
         },
         body: JSON.stringify({
           maxUses: parseInt(newCodeMaxUses) || 10,
-          expiresAt: newCodeExpiry || undefined
+          expiresAt: newCodeExpiry || undefined,
+          codeType: newCodeType,
+          reservedUsername: newCodeType === 'reserved_username' ? newCodeReservedUsername : undefined
         })
       });
       const data = await res.json() as ApiResponse<{ code: string }>;
@@ -1980,6 +2504,8 @@ function App() {
         setCreateCodeStatus(`Created code: ${data.data.code}`);
         setNewCodeMaxUses('10');
         setNewCodeExpiry('');
+        setNewCodeType('general');
+        setNewCodeReservedUsername('');
         fetchRegistrationCodes();
       } else {
         setCreateCodeStatus(`Error: ${data.error}`);
@@ -1990,44 +2516,37 @@ function App() {
   };
 
   const handleDeleteCode = async (codeId: string) => {
-    if (!adminToken || !confirm('Delete this registration code?')) return;
+    if (!hasAdminAuth || !confirm('Delete this registration code?')) return;
     try {
       const res = await fetch(`${API_BASE}/api/admin/registration-codes/${codeId}`, {
         method: 'DELETE',
-        headers: { 'X-Admin-Token': adminToken }
+        headers: getAdminHeaders()
       });
       const data = await res.json() as ApiResponse;
       if (data.success) {
         fetchRegistrationCodes();
       } else {
-        setAdminError(data.error || 'Failed to delete code');
+        setSuperadminError(data.error || 'Failed to delete code');
       }
     } catch (error) {
-      setAdminError('Failed to delete code');
+      setSuperadminError('Failed to delete code');
     }
-  };
-
-  const toggleRegCodesDropdown = () => {
-    if (!regCodesExpanded && registrationCodes.length === 0) {
-      fetchRegistrationCodes();
-    }
-    setRegCodesExpanded(!regCodesExpanded);
   };
 
   const copyCodeUrl = (code: string) => {
     const url = `${window.location.origin}?code=${code}`;
     navigator.clipboard.writeText(url);
-    setAdminError('Registration URL copied to clipboard!');
-    setTimeout(() => setAdminError(''), 2000);
+    setSuperadminError('Registration URL copied to clipboard!');
+    setTimeout(() => setSuperadminError(''), 2000);
   };
 
   // DAR upload functions
   const fetchPackages = async () => {
-    if (!adminToken) return;
+    if (!hasAdminAuth) return;
     setPackagesLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/admin/dar`, {
-        headers: { 'X-Admin-Token': adminToken }
+        headers: getAdminHeaders()
       });
       const data = await res.json() as ApiResponse<{ packageIds: string[] }>;
       if (data.success && data.data) {
@@ -2040,15 +2559,8 @@ function App() {
     }
   };
 
-  const toggleDarDropdown = () => {
-    if (!darExpanded && packageIds.length === 0) {
-      fetchPackages();
-    }
-    setDarExpanded(!darExpanded);
-  };
-
   const handleDarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!adminToken || !e.target.files || e.target.files.length === 0) return;
+    if (!hasAdminAuth || !e.target.files || e.target.files.length === 0) return;
 
     const file = e.target.files[0];
     if (!file.name.endsWith('.dar')) {
@@ -2065,7 +2577,7 @@ function App() {
 
       const res = await fetch(`${API_BASE}/api/admin/dar`, {
         method: 'POST',
-        headers: { 'X-Admin-Token': adminToken },
+        headers: getAdminHeaders(),
         body: formData
       });
 
@@ -2085,6 +2597,160 @@ function App() {
     }
   };
 
+  const handleDarInstallFromUrl = async () => {
+    if (!hasAdminAuth || !darInstallUrl.trim()) return;
+
+    // Validate URL format
+    let baseUrl: string;
+    try {
+      const parsed = new URL(darInstallUrl.trim());
+      baseUrl = parsed.origin;
+    } catch {
+      setDarUploadStatus('Error: Invalid URL format');
+      return;
+    }
+
+    setDarUploading(true);
+    setDarUploadStatus('Fetching package info...');
+
+    try {
+      // First fetch package info from the app's /api/package endpoint
+      const packageInfoRes = await fetch(`${baseUrl}/api/package`);
+      if (!packageInfoRes.ok) {
+        setDarUploadStatus(`Error: Could not fetch package info from ${baseUrl}/api/package`);
+        setDarUploading(false);
+        return;
+      }
+
+      const packageInfo = await packageInfoRes.json() as {
+        name?: string;
+        packageId?: string | null;
+        darUrl?: string;
+      };
+
+      if (!packageInfo.darUrl) {
+        setDarUploadStatus('Error: No darUrl found in package info');
+        setDarUploading(false);
+        return;
+      }
+
+      setDarUploadStatus(`Installing ${packageInfo.name || 'package'}...`);
+
+      // Now install using the darUrl
+      const res = await fetch(`${API_BASE}/api/admin/dar`, {
+        method: 'POST',
+        headers: {
+          ...getAdminHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ darUrl: packageInfo.darUrl })
+      });
+
+      const data = await res.json() as ApiResponse<{ mainPackageId: string; darName: string; size: number }>;
+      if (data.success && data.data) {
+        setDarUploadStatus(`Installed: ${data.data.darName} (Package: ${data.data.mainPackageId.substring(0, 16)}...)`);
+        fetchPackages(); // Refresh package list
+        setShowInstallFromUrl(false);
+        setDarInstallUrl('');
+      } else {
+        setDarUploadStatus(`Error: ${data.error}`);
+      }
+    } catch (error) {
+      setDarUploadStatus(`Error: ${error instanceof Error ? error.message : 'Install failed'}`);
+    } finally {
+      setDarUploading(false);
+    }
+  };
+
+  // Check and install package for a docked app if needed
+  const checkAndInstallAppPackage = async (appId: string, appUrl: string): Promise<boolean> => {
+    if (!hasAdminAuth) {
+      // Non-admin users can't install packages, just proceed
+      return true;
+    }
+
+    // Skip if already checking or ready
+    const currentStatus = appPackageStatus[appId];
+    if (currentStatus?.status === 'checking' || currentStatus?.status === 'installing') {
+      return false; // Still in progress
+    }
+    if (currentStatus?.status === 'ready') {
+      return true; // Already verified
+    }
+
+    setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'checking', message: 'Checking package...' } }));
+
+    try {
+      // Fetch package info from the app
+      const packageInfoRes = await fetch(`${appUrl}/api/package`);
+      if (!packageInfoRes.ok) {
+        // App doesn't have /api/package endpoint, proceed anyway
+        setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'ready' } }));
+        return true;
+      }
+
+      const packageInfo = await packageInfoRes.json() as {
+        name?: string;
+        packageId?: string | null;
+        darUrl?: string;
+        templates?: string[];
+      };
+
+      // If no packageId specified, proceed
+      if (!packageInfo.packageId || !packageInfo.darUrl) {
+        setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'ready' } }));
+        return true;
+      }
+
+      // Check if package is already installed
+      const packagesRes = await fetch(`${API_BASE}/api/admin/dar`, {
+        headers: getAdminHeaders()
+      });
+      const packagesData = await packagesRes.json() as ApiResponse<{ packageIds: string[] }>;
+
+      if (packagesData.success && packagesData.data?.packageIds?.includes(packageInfo.packageId)) {
+        // Package already installed
+        setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'ready' } }));
+        return true;
+      }
+
+      // Need to install the package
+      setAppPackageStatus(prev => ({
+        ...prev,
+        [appId]: { status: 'installing', message: `Installing ${packageInfo.name || 'package'}...` }
+      }));
+
+      const installRes = await fetch(`${API_BASE}/api/admin/dar`, {
+        method: 'POST',
+        headers: {
+          ...getAdminHeaders(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ darUrl: packageInfo.darUrl })
+      });
+
+      const installData = await installRes.json() as ApiResponse<{ mainPackageId: string }>;
+
+      if (installData.success) {
+        setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'ready' } }));
+        fetchPackages(); // Refresh package list
+        return true;
+      } else {
+        setAppPackageStatus(prev => ({
+          ...prev,
+          [appId]: { status: 'error', message: installData.error || 'Installation failed' }
+        }));
+        return false;
+      }
+    } catch (error) {
+      setAppPackageStatus(prev => ({
+        ...prev,
+        [appId]: { status: 'error', message: error instanceof Error ? error.message : 'Check failed' }
+      }));
+      return false;
+    }
+  };
+
   // Validate registration code on mount
   useEffect(() => {
     const validateCode = async () => {
@@ -2095,9 +2761,12 @@ function App() {
       }
       try {
         const res = await fetch(`${API_BASE}/api/auth/validate-code?code=${encodeURIComponent(code)}`);
-        const data = await res.json() as ApiResponse<{ valid: boolean; reason?: string; usesRemaining?: number }>;
+        const data = await res.json() as ApiResponse<{ valid: boolean; reason?: string; usesRemaining?: number; codeType?: string; reservedUsername?: string | null }>;
         if (data.success && data.data) {
           setCodeValidation({ ...data.data, checked: true });
+          if (data.data.codeType === 'reserved_username' && data.data.reservedUsername) {
+            setLoginUsername(data.data.reservedUsername);
+          }
         } else {
           setCodeValidation({ valid: false, reason: 'error', checked: true });
         }
@@ -2108,81 +2777,615 @@ function App() {
     validateCode();
   }, [registrationCode]);
 
-  // Admin login handler
-  const handleAdminLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAdminLoading(true);
-    setAdminError('');
-
+  // Superadmin functions
+  const fetchSuperadminSession = async () => {
+    if (!superadminToken) return;
     try {
-      const res = await fetch(`${API_BASE}/api/admin/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: adminPassword })
+      const res = await fetch(`${API_BASE}/api/superadmin/verify`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
       });
-      const data = await res.json() as ApiResponse<{ token: string }>;
-
-      if (data.success && data.data?.token) {
-        localStorage.setItem('adminToken', data.data.token);
-        setAdminToken(data.data.token);
-        setAdminPassword('');
-        fetchDbUsers();
+      const data = await res.json() as ApiResponse<{ user: SuperadminUser }>;
+      if (data.success && data.data?.user) {
+        setSuperadminUser(data.data.user);
       } else {
-        setAdminError(data.error || 'Login failed');
+        localStorage.removeItem('superadminToken');
+        setSuperadminToken(null);
+        setSuperadminUser(null);
+      }
+    } catch {
+      localStorage.removeItem('superadminToken');
+      setSuperadminToken(null);
+    }
+  };
+
+  const fetchAdminUsers = async () => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/users`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<AdminUserRow[]>;
+      if (data.success && data.data) {
+        setAdminUsers(data.data);
       }
     } catch (error) {
-      setAdminError('Login failed');
-      console.error('Admin login error:', error);
+      console.error('Failed to fetch admin users:', error);
+    }
+  };
+
+  const fetchSuperadminConfig = async () => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/config`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<{ config: ConfigData; overriddenKeys: string[] }>;
+      if (data.success && data.data) {
+        setConfigData(data.data.config);
+        setConfigOverriddenKeys(data.data.overriddenKeys);
+      }
+    } catch (error) {
+      console.error('Failed to fetch config:', error);
+    }
+  };
+
+  const fetchRpcEndpoints = async () => {
+    if (!superadminToken) return;
+    setRpcLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<RpcEndpointRow[]>;
+      if (data.success && data.data) {
+        setRpcEndpoints(data.data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch RPC endpoints:', error);
     } finally {
-      setAdminLoading(false);
+      setRpcLoading(false);
     }
   };
 
-  // Admin logout handler
-  const handleAdminLogout = () => {
-    localStorage.removeItem('adminToken');
-    setAdminToken(null);
-    setDbUsers([]);
-    setCantonUsers([]);
+  const fetchAvailableChains = async () => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc/chains`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<Array<{ chain: string; chain_type: string; chain_id: string | null; network: string }>>;
+      if (data.success && data.data) {
+        setAvailableChains(data.data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch available chains:', error);
+    }
   };
 
-  // Load admin data when entering admin view and authenticated
+  const handleAddRpc = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify(newRpc)
+      });
+      const data = await res.json() as ApiResponse<RpcEndpointRow>;
+      if (data.success) {
+        setShowAddRpc(false);
+        setNewRpc({ chain_type: 'evm', chain_name: 'Ethereum', chain_id: '1', network: 'mainnet', name: '', rpc_url: '', priority: 0, is_enabled: true });
+        fetchRpcEndpoints();
+      } else {
+        alert(data.error || 'Failed to add RPC endpoint');
+      }
+    } catch (error) {
+      console.error('Failed to add RPC endpoint:', error);
+    }
+  };
+
+  const handleUpdateRpc = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!superadminToken || !editingRpc) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc?id=${editingRpc.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({
+          chain_type: editingRpc.chain_type,
+          chain_name: editingRpc.chain_name,
+          chain_id: editingRpc.chain_id,
+          network: editingRpc.network,
+          name: editingRpc.name,
+          rpc_url: editingRpc.rpc_url,
+          priority: editingRpc.priority,
+          is_enabled: editingRpc.is_enabled === 1
+        })
+      });
+      const data = await res.json() as ApiResponse<RpcEndpointRow>;
+      if (data.success) {
+        setEditingRpc(null);
+        fetchRpcEndpoints();
+      } else {
+        alert(data.error || 'Failed to update RPC endpoint');
+      }
+    } catch (error) {
+      console.error('Failed to update RPC endpoint:', error);
+    }
+  };
+
+  const handleDeleteRpc = async (id: string) => {
+    if (!superadminToken) return;
+    if (!confirm('Are you sure you want to delete this RPC endpoint?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc?id=${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse;
+      if (data.success) {
+        fetchRpcEndpoints();
+      } else {
+        alert(data.error || 'Failed to delete RPC endpoint');
+      }
+    } catch (error) {
+      console.error('Failed to delete RPC endpoint:', error);
+    }
+  };
+
+  const handleToggleRpcEnabled = async (endpoint: RpcEndpointRow) => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/rpc?id=${endpoint.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({ is_enabled: endpoint.is_enabled === 0 })
+      });
+      const data = await res.json() as ApiResponse<RpcEndpointRow>;
+      if (data.success) {
+        fetchRpcEndpoints();
+      }
+    } catch (error) {
+      console.error('Failed to toggle RPC endpoint:', error);
+    }
+  };
+
+  const fetchApps = async () => {
+    if (!superadminToken) return;
+    setAppsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/apps`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<AppRow[]>;
+      if (data.success && data.data) {
+        setAppsList(data.data);
+        // Check package status for all apps with URLs
+        checkAllAppsPackageStatus(data.data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch apps:', error);
+    } finally {
+      setAppsLoading(false);
+    }
+  };
+
+  // Check package installation status for all apps
+  const checkAllAppsPackageStatus = async (apps: AppRow[]) => {
+    if (!hasAdminAuth) return;
+
+    // Get the list of installed packages
+    let installedPackages: string[] = [];
+    try {
+      const packagesRes = await fetch(`${API_BASE}/api/admin/dar`, {
+        headers: getAdminHeaders()
+      });
+      const packagesData = await packagesRes.json() as ApiResponse<{ packageIds: string[] }>;
+      if (packagesData.success && packagesData.data?.packageIds) {
+        installedPackages = packagesData.data.packageIds;
+      }
+    } catch (error) {
+      console.error('Failed to fetch installed packages:', error);
+      return;
+    }
+
+    // Check each app with a URL
+    for (const app of apps) {
+      if (!app.url) continue;
+
+      // Skip if already checked
+      const currentStatus = appPackageStatus[app.id];
+      if (currentStatus?.status === 'ready' || currentStatus?.status === 'checking') continue;
+
+      try {
+        setAppPackageStatus(prev => ({ ...prev, [app.id]: { status: 'checking', message: 'Checking...' } }));
+
+        const packageInfoRes = await fetch(`${app.url}/api/package`);
+        if (!packageInfoRes.ok) {
+          // App doesn't have /api/package endpoint - mark as N/A
+          setAppPackageStatus(prev => ({ ...prev, [app.id]: { status: 'na', message: 'No package endpoint' } }));
+          continue;
+        }
+
+        const packageInfo = await packageInfoRes.json() as {
+          name?: string;
+          packageId?: string | null;
+          darUrl?: string;
+        };
+
+        if (!packageInfo.packageId) {
+          // No package ID specified
+          setAppPackageStatus(prev => ({ ...prev, [app.id]: { status: 'na', message: 'No package required' } }));
+          continue;
+        }
+
+        // Check if installed
+        if (installedPackages.includes(packageInfo.packageId)) {
+          setAppPackageStatus(prev => ({ ...prev, [app.id]: { status: 'ready', message: 'Installed' } }));
+        } else {
+          setAppPackageStatus(prev => ({ ...prev, [app.id]: { status: 'not_installed', message: 'Not installed' } }));
+        }
+      } catch (error) {
+        setAppPackageStatus(prev => ({
+          ...prev,
+          [app.id]: { status: 'error', message: 'Failed to check' }
+        }));
+      }
+    }
+  };
+
+  const handleAddApp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/apps`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({
+          id: newApp.id || undefined,
+          name: newApp.name,
+          icon: newApp.icon,
+          color: newApp.color,
+          url: newApp.url || null,
+          sort_order: newApp.sort_order,
+          is_enabled: newApp.is_enabled
+        })
+      });
+      const data = await res.json() as ApiResponse<AppRow>;
+      if (data.success) {
+        setShowAddApp(false);
+        setNewApp({ id: '', name: '', icon: '', color: '#6366f1', url: '', sort_order: 0, is_enabled: true });
+        fetchApps();
+      } else {
+        alert(data.error || 'Failed to add app');
+      }
+    } catch (error) {
+      console.error('Failed to add app:', error);
+    }
+  };
+
+  const handleUpdateApp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!superadminToken || !editingApp) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/apps?id=${editingApp.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({
+          name: editingApp.name,
+          icon: editingApp.icon,
+          color: editingApp.color,
+          url: editingApp.url,
+          sort_order: editingApp.sort_order,
+          is_enabled: editingApp.is_enabled === 1
+        })
+      });
+      const data = await res.json() as ApiResponse<AppRow>;
+      if (data.success) {
+        setEditingApp(null);
+        fetchApps();
+      } else {
+        alert(data.error || 'Failed to update app');
+      }
+    } catch (error) {
+      console.error('Failed to update app:', error);
+    }
+  };
+
+  const handleDeleteApp = async (id: string) => {
+    if (!superadminToken) return;
+    if (!confirm('Are you sure you want to delete this app?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/apps?id=${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse;
+      if (data.success) {
+        fetchApps();
+      } else {
+        alert(data.error || 'Failed to delete app');
+      }
+    } catch (error) {
+      console.error('Failed to delete app:', error);
+    }
+  };
+
+  const handleToggleAppEnabled = async (app: AppRow) => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/apps?id=${app.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({ is_enabled: app.is_enabled === 0 })
+      });
+      const data = await res.json() as ApiResponse<AppRow>;
+      if (data.success) {
+        fetchApps();
+      }
+    } catch (error) {
+      console.error('Failed to toggle app:', error);
+    }
+  };
+
+  const handleSuperadminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSuperadminLoading(true);
+    setSuperadminError('');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: superadminUsername, password: superadminPassword })
+      });
+      const data = await res.json() as ApiResponse<{ token: string; user: SuperadminUser }>;
+
+      if (data.success && data.data?.token) {
+        localStorage.setItem('superadminToken', data.data.token);
+        setSuperadminToken(data.data.token);
+        setSuperadminUser(data.data.user);
+        setSuperadminUsername('');
+        setSuperadminPassword('');
+        fetchAdminUsers();
+        fetchSuperadminConfig();
+      } else {
+        setSuperadminError(data.error || 'Login failed');
+      }
+    } catch (error) {
+      setSuperadminError('Login failed');
+      console.error('Superadmin login error:', error);
+    } finally {
+      setSuperadminLoading(false);
+    }
+  };
+
+  const handleSuperadminLogout = async () => {
+    if (superadminToken) {
+      try {
+        await fetch(`${API_BASE}/api/superadmin/logout`, {
+          method: 'POST',
+          headers: { 'X-Superadmin-Token': superadminToken }
+        });
+      } catch {}
+    }
+    localStorage.removeItem('superadminToken');
+    setSuperadminToken(null);
+    setSuperadminUser(null);
+    setAdminUsers([]);
+    setConfigData(null);
+  };
+
+  const handleCreateAdminUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!superadminToken) return;
+    setSuperadminError('');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({
+          username: newAdminUsername,
+          password: newAdminPassword,
+          displayName: newAdminDisplayName || undefined,
+          isSuperadmin: newAdminIsSuperadmin
+        })
+      });
+      const data = await res.json() as ApiResponse<AdminUserRow>;
+
+      if (data.success) {
+        setShowCreateAdminUser(false);
+        setNewAdminUsername('');
+        setNewAdminPassword('');
+        setNewAdminDisplayName('');
+        setNewAdminIsSuperadmin(false);
+        fetchAdminUsers();
+      } else {
+        setSuperadminError(data.error || 'Failed to create user');
+      }
+    } catch (error) {
+      setSuperadminError('Failed to create user');
+    }
+  };
+
+  const handleDeleteAdminUser = async (userId: string) => {
+    if (!superadminToken) return;
+    if (!confirm('Are you sure you want to delete this admin user?')) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/users/${userId}`, {
+        method: 'DELETE',
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<void>;
+
+      if (data.success) {
+        fetchAdminUsers();
+      } else {
+        setSuperadminError(data.error || 'Failed to delete user');
+      }
+    } catch (error) {
+      setSuperadminError('Failed to delete user');
+    }
+  };
+
+  const handleToggleSuperadmin = async (userId: string, currentValue: boolean) => {
+    if (!superadminToken) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({ isSuperadmin: !currentValue })
+      });
+      const data = await res.json() as ApiResponse<AdminUserRow>;
+
+      if (data.success) {
+        fetchAdminUsers();
+      } else {
+        setSuperadminError(data.error || 'Failed to update user');
+      }
+    } catch (error) {
+      setSuperadminError('Failed to update user');
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    if (!superadminToken || !editConfigData) return;
+    setSuperadminError('');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/config`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify(editConfigData)
+      });
+      const data = await res.json() as ApiResponse<{ config: ConfigData; overriddenKeys: string[] }>;
+
+      if (data.success && data.data) {
+        setConfigData(data.data.config);
+        setConfigOverriddenKeys(data.data.overriddenKeys);
+        setEditingConfig(false);
+        setEditConfigData(null);
+        // Refresh the page config
+        window.location.reload();
+      } else {
+        setSuperadminError(data.error || 'Failed to save configuration');
+      }
+    } catch (error) {
+      setSuperadminError('Failed to save configuration');
+    }
+  };
+
+  // Load admin data when entering admin view
   useEffect(() => {
-    if (currentView === 'admin' && adminToken) {
-      fetchDbUsers();
-      // Don't fetch canton users here - load on dropdown click instead
+    if (currentView === 'admin' && superadminToken) {
+      fetchSuperadminSession();
+      fetchAdminUsers();
+      fetchSuperadminConfig();
     }
-  }, [currentView, adminToken]);
+  }, [currentView, superadminToken]);
 
-  // Admin view - requires admin password
+  // Load section-specific data when switching sections in admin
+  useEffect(() => {
+    if (currentView !== 'admin' || !superadminToken) return;
+
+    switch (superadminSection) {
+      case 'admin-users':
+        fetchAdminUsers();
+        break;
+      case 'config':
+        fetchSuperadminConfig();
+        break;
+      case 'users':
+        fetchDbUsers();
+        break;
+      case 'parties':
+        fetchCantonUsers();
+        break;
+      case 'codes':
+        fetchRegistrationCodes();
+        break;
+      case 'packages':
+        fetchPackages();
+        break;
+      case 'rpc':
+        fetchRpcEndpoints();
+        fetchAvailableChains();
+        break;
+      case 'apps':
+        fetchApps();
+        break;
+    }
+  }, [superadminSection, superadminToken, currentView]);
+
+  // Admin view - requires username/password login
   if (currentView === 'admin') {
-    // Show admin login if not authenticated
-    if (!adminToken) {
+    // Show login if not authenticated
+    if (!superadminToken || !superadminUser) {
       return (
         <div className={`app theme-${theme}`}>
           <div className="login-container">
             <div className="login-card">
-              <h1>Admin Login</h1>
-              <p className="login-subtitle">Enter admin password to continue</p>
+              <h1>Admin</h1>
+              <p className="login-subtitle">System administration login</p>
 
-              {adminError && (
-                <div className="login-error">{adminError}</div>
+              {superadminError && (
+                <div className="login-error">{superadminError}</div>
               )}
 
-              <form onSubmit={handleAdminLogin}>
+              <form onSubmit={handleSuperadminLogin}>
+                <div className="form-group">
+                  <label>Username</label>
+                  <input
+                    type="text"
+                    value={superadminUsername}
+                    onChange={(e) => setSuperadminUsername(e.target.value)}
+                    placeholder="Enter username"
+                    required
+                  />
+                </div>
                 <div className="form-group">
                   <label>Password</label>
                   <input
                     type="password"
-                    value={adminPassword}
-                    onChange={(e) => setAdminPassword(e.target.value)}
-                    placeholder="Enter admin password"
+                    value={superadminPassword}
+                    onChange={(e) => setSuperadminPassword(e.target.value)}
+                    placeholder="Enter password"
                     required
                   />
                 </div>
 
-                <button type="submit" className="send-btn" disabled={adminLoading}>
-                  {adminLoading ? 'Please wait...' : 'Login'}
+                <button type="submit" className="send-btn admin-btn" disabled={superadminLoading}>
+                  {superadminLoading ? 'Please wait...' : 'Login'}
                 </button>
               </form>
 
@@ -2201,47 +3404,315 @@ function App() {
 
     return (
       <div className={`app theme-${theme}`}>
-        {/* Floating action buttons */}
-        <div className="admin-floating-actions">
-          <button onClick={() => navigateTo('wallet')} className="floating-btn wallet-btn" title="Back to Wallet">
-            ←
-          </button>
-          <button onClick={handleAdminLogout} className="floating-btn logout-btn" title="Logout">
-            ⏻
-          </button>
-        </div>
-
-        <main className="admin-main">
-          {/* User Management Section - Collapsible */}
-          <section className="admin-card">
-            <div className="admin-card-header clickable" onClick={() => setUsersExpanded(!usersExpanded)}>
-              <h2>
-                <span className={`dropdown-arrow ${usersExpanded ? 'expanded' : ''}`}>▶</span>
-                User Management
-                {nodeName && <span className="node-badge">Node: {nodeName}</span>}
-                {dbUsers.length > 0 && <span className="count-badge">{dbUsers.length}</span>}
-              </h2>
+        <div className="superadmin-layout">
+          {/* Left Sidebar */}
+          <aside className={`superadmin-sidebar ${adminSidebarCollapsed ? 'collapsed' : ''}`}>
+            <div className="sidebar-header">
+              <h2>Admin</h2>
+              {superadminUser.isSuperadmin && <span className="superadmin-badge">SUPERADMIN</span>}
               <button
-                onClick={(e) => { e.stopPropagation(); fetchDbUsers(); }}
-                className="refresh-btn"
-                disabled={adminLoading}
+                className="sidebar-toggle-btn"
+                onClick={() => setAdminSidebarCollapsed(!adminSidebarCollapsed)}
+                title={adminSidebarCollapsed ? 'Show navigation' : 'Hide navigation'}
               >
-                {adminLoading ? 'Loading...' : 'Refresh'}
+                {adminSidebarCollapsed ? '☰' : '✕'}
               </button>
             </div>
 
-            {adminError && (
-              <div className={`transfer-status ${adminError.includes('error') || adminError.includes('Error') || adminError.includes('Failed') ? 'error' : 'success'}`}>
-                {adminError}
+            <nav className="sidebar-nav">
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'admin-users' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('admin-users')}
+              >
+                <ShieldCheck size={18} className="nav-icon" />
+                <span className="nav-label">Admin Users</span>
+                {adminUsers.length > 0 && <span className="nav-badge">{adminUsers.length}</span>}
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'users' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('users')}
+              >
+                <Users size={18} className="nav-icon" />
+                <span className="nav-label">User Management</span>
+                {dbUsers.length > 0 && <span className="nav-badge">{dbUsers.length}</span>}
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'parties' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('parties')}
+              >
+                <Building2 size={18} className="nav-icon" />
+                <span className="nav-label">Canton Parties</span>
+                {cantonUsers.length > 0 && <span className="nav-badge">{cantonUsers.length}</span>}
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'codes' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('codes')}
+              >
+                <KeyRound size={18} className="nav-icon" />
+                <span className="nav-label">Registration Codes</span>
+                {registrationCodes.length > 0 && <span className="nav-badge">{registrationCodes.length}</span>}
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'packages' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('packages')}
+              >
+                <Package size={18} className="nav-icon" />
+                <span className="nav-label">Daml Packages</span>
+                {packageIds.length > 0 && <span className="nav-badge">{packageIds.length}</span>}
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'rpc' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('rpc')}
+              >
+                <Globe size={18} className="nav-icon" />
+                <span className="nav-label">RPC Endpoints</span>
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'apps' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('apps')}
+              >
+                <LayoutGrid size={18} className="nav-icon" />
+                <span className="nav-label">Dock Apps</span>
+              </button>
+
+              <button
+                className={`sidebar-nav-item ${superadminSection === 'config' ? 'active' : ''}`}
+                onClick={() => setSuperadminSection('config')}
+              >
+                <Settings size={18} className="nav-icon" />
+                <span className="nav-label">Configuration</span>
+                {configOverriddenKeys.length > 0 && <span className="nav-badge override">{configOverriddenKeys.length}</span>}
+              </button>
+            </nav>
+
+            <div className="sidebar-footer">
+
+              <button onClick={handleSuperadminLogout} className="sidebar-action-btn logout">
+                <LogOut size={18} className="nav-icon" />
+                Logout
+              </button>
+            </div>
+          </aside>
+
+          {/* Main Content */}
+          <main className="superadmin-main">
+            {superadminError && (
+              <div className="transfer-status error" style={{ marginBottom: '1rem' }}>
+                {superadminError}
               </div>
             )}
 
-            {usersExpanded && (
-              <div className="admin-users-table">
+            {/* Admin Users Management Section */}
+            {superadminSection === 'admin-users' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    Admin Users
+                    {adminUsers.length > 0 && <span className="count-badge">{adminUsers.length}</span>}
+                  </h2>
+                  {superadminUser.isSuperadmin && (
+                    <button
+                      onClick={() => setShowCreateAdminUser(true)}
+                      className="send-btn admin-btn"
+                    >
+                      + New Admin
+                    </button>
+                  )}
+                </div>
+
+                <div className="admin-users-table">
+                  <div className="admin-table-header">
+                    <span>Username</span>
+                    <span>Display Name</span>
+                    <span>Superadmin</span>
+                    <span>Created</span>
+                    <span>Actions</span>
+                  </div>
+                  {adminUsers.length === 0 ? (
+                    <div className="no-transactions">No admin users found</div>
+                  ) : (
+                    adminUsers.map((user) => (
+                      <div key={user.id} className="admin-table-row">
+                        <span className="admin-cell">{user.username}</span>
+                        <span className="admin-cell">{user.displayName || '-'}</span>
+                        <span className="admin-cell">
+                          {superadminUser.isSuperadmin ? (
+                            <label className="toggle-switch">
+                              <input
+                                type="checkbox"
+                                checked={user.isSuperadmin}
+                                onChange={() => handleToggleSuperadmin(user.id, user.isSuperadmin)}
+                                disabled={user.id === superadminUser.id}
+                              />
+                              <span className="toggle-slider"></span>
+                            </label>
+                          ) : (
+                            user.isSuperadmin ? 'Yes' : 'No'
+                          )}
+                        </span>
+                        <span className="admin-cell">{new Date(user.createdAt).toLocaleDateString()}</span>
+                        <span className="admin-cell admin-actions">
+                          {superadminUser.isSuperadmin && user.id !== superadminUser.id && (
+                            <button
+                              onClick={() => handleDeleteAdminUser(user.id)}
+                              className="delete-btn"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Configuration Management Section */}
+            {superadminSection === 'config' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    Configuration
+                    
+                  </h2>
+                  {superadminUser.isSuperadmin && configData && !editingConfig && (
+                    <button
+                      onClick={() => { setEditConfigData({...configData}); setEditingConfig(true); }}
+                      className="send-btn admin-btn"
+                    >
+                      Edit Config
+                    </button>
+                  )}
+                </div>
+
+                {configData && (
+                  <div className="section-content">
+                    {editingConfig && editConfigData ? (
+                  <div className="config-edit-form">
+                    <div className="form-group">
+                      <label>Organization Name (ORG_NAME)</label>
+                      <input
+                        type="text"
+                        value={editConfigData.ORG_NAME}
+                        onChange={(e) => setEditConfigData({...editConfigData, ORG_NAME: e.target.value})}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Relying Party Name (RP_NAME)</label>
+                      <input
+                        type="text"
+                        value={editConfigData.RP_NAME}
+                        onChange={(e) => setEditConfigData({...editConfigData, RP_NAME: e.target.value})}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Theme</label>
+                      <select
+                        value={editConfigData.THEME}
+                        onChange={(e) => setEditConfigData({...editConfigData, THEME: e.target.value})}
+                        className="role-select"
+                      >
+                        <option value="purple">Purple</option>
+                        <option value="blue">Blue</option>
+                        <option value="green">Green</option>
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Dock Apps (JSON)</label>
+                      <textarea
+                        value={editConfigData.DOCK_APPS}
+                        onChange={(e) => setEditConfigData({...editConfigData, DOCK_APPS: e.target.value})}
+                        rows={6}
+                        style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Allowed Iframe Origins (comma-separated)</label>
+                      <textarea
+                        value={editConfigData.ALLOWED_IFRAME_ORIGINS}
+                        onChange={(e) => setEditConfigData({...editConfigData, ALLOWED_IFRAME_ORIGINS: e.target.value})}
+                        rows={3}
+                      />
+                    </div>
+                    <div className="modal-buttons" style={{ marginTop: '1rem' }}>
+                      <button
+                        onClick={() => { setEditingConfig(false); setEditConfigData(null); }}
+                        className="refresh-btn"
+                      >
+                        Cancel
+                      </button>
+                      <button onClick={handleSaveConfig} className="send-btn admin-btn">
+                        Save Configuration
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="config-display">
+                    <div className="config-item">
+                      <strong>Organization Name:</strong>
+                      <span>{configData.ORG_NAME}</span>
+                      {configOverriddenKeys.includes('ORG_NAME') && <span className="override-badge">overridden</span>}
+                    </div>
+                    <div className="config-item">
+                      <strong>RP Name:</strong>
+                      <span>{configData.RP_NAME}</span>
+                      {configOverriddenKeys.includes('RP_NAME') && <span className="override-badge">overridden</span>}
+                    </div>
+                    <div className="config-item">
+                      <strong>Theme:</strong>
+                      <span>{configData.THEME}</span>
+                      {configOverriddenKeys.includes('THEME') && <span className="override-badge">overridden</span>}
+                    </div>
+                    <div className="config-item">
+                      <strong>Dock Apps:</strong>
+                      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: '0.85rem', background: 'var(--card-bg)', padding: '0.5rem', borderRadius: '4px', marginTop: '0.5rem' }}>
+                        {configData.DOCK_APPS}
+                      </pre>
+                      {configOverriddenKeys.includes('DOCK_APPS') && <span className="override-badge">overridden</span>}
+                    </div>
+                    <div className="config-item">
+                      <strong>Allowed Iframe Origins:</strong>
+                      <span style={{ wordBreak: 'break-all' }}>{configData.ALLOWED_IFRAME_ORIGINS}</span>
+                      {configOverriddenKeys.includes('ALLOWED_IFRAME_ORIGINS') && <span className="override-badge">overridden</span>}
+                    </div>
+                  </div>
+                )}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* Users Section - Same as admin panel but accessible from superadmin */}
+            {superadminSection === 'users' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    User Management
+                    {nodeName && <span className="node-badge">Node: {nodeName}</span>}
+                    {dbUsers.length > 0 && <span className="count-badge">{dbUsers.length}</span>}
+                  </h2>
+                  <button
+                    onClick={() => fetchDbUsers()}
+                    className="refresh-btn"
+                    disabled={adminLoading}
+                  >
+                    {adminLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+
+                <div className="admin-users-table">
                 <div className="admin-table-header">
                   <span>Username</span>
                   <span>Display Name</span>
-                  <span>Role</span>
                   <span>Party ID</span>
                   <span>Actions</span>
                 </div>
@@ -2252,16 +3723,6 @@ function App() {
                     <div key={user.id} className="admin-table-row">
                       <span className="admin-cell">{user.username}</span>
                       <span className="admin-cell">{user.display_name}</span>
-                      <span className="admin-cell">
-                        <select
-                          value={user.role}
-                          onChange={(e) => handleUpdateUserRole(user.id, e.target.value)}
-                          className="role-select"
-                        >
-                          <option value="user">user</option>
-                          <option value="admin">admin</option>
-                        </select>
-                      </span>
                       <span className="admin-cell party-id-cell" title={user.party_id || ''}>
                         {user.party_id || 'Not linked'}
                       </span>
@@ -2283,36 +3744,34 @@ function App() {
                     </div>
                   ))
                 )}
-              </div>
+                </div>
+              </section>
             )}
-          </section>
 
-          {/* Canton Parties Section - Collapsible */}
-          <section className="admin-card">
-            <div className="admin-card-header clickable" onClick={togglePartiesDropdown}>
-              <h2>
-                <span className={`dropdown-arrow ${partiesExpanded ? 'expanded' : ''}`}>▶</span>
-                Canton Parties
-                {cantonUsers.length > 0 && <span className="count-badge">{cantonUsers.length}</span>}
-              </h2>
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowCreateUser(true); }}
-                className="send-btn"
-                style={{ padding: '0.5rem 1rem', fontSize: '0.9rem' }}
-              >
-                + New Party
-              </button>
-            </div>
+            {/* Canton Parties Section */}
+            {superadminSection === 'parties' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    Canton Parties
+                    {cantonUsers.length > 0 && <span className="count-badge">{cantonUsers.length}</span>}
+                  </h2>
+                  <button
+                    onClick={() => setShowCreateUser(true)}
+                    className="send-btn admin-btn"
+                  >
+                    + New Party
+                  </button>
+                </div>
 
-            {partiesExpanded && (
-              <div className="admin-parties-list">
-                {partiesLoading ? (
-                  <div className="no-transactions">Loading parties...</div>
-                ) : cantonUsers.length === 0 ? (
-                  <div className="no-transactions">No parties found</div>
-                ) : (
-                  cantonUsers.map((user) => (
-                    <div key={user.username} className="admin-party-item">
+                <div className="admin-parties-list">
+                  {partiesLoading ? (
+                    <div className="no-transactions">Loading parties...</div>
+                  ) : cantonUsers.length === 0 ? (
+                    <div className="no-transactions">No parties found</div>
+                  ) : (
+                    cantonUsers.map((user) => (
+                      <div key={user.username} className="admin-party-item">
                       <div className="party-info">
                         <strong>{user.displayName || user.username}</strong>
                         <span className="party-username">@{user.username}</span>
@@ -2320,48 +3779,59 @@ function App() {
                       {user.partyId && (
                         <div className="party-id-display">{user.partyId}</div>
                       )}
-                    </div>
-                  ))
-                )}
-              </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
             )}
-          </section>
 
-          {/* Registration Codes Section - Collapsible */}
-          <section className="admin-card">
-            <div className="admin-card-header clickable" onClick={toggleRegCodesDropdown}>
-              <h2>
-                <span className={`dropdown-arrow ${regCodesExpanded ? 'expanded' : ''}`}>▶</span>
-                Registration Codes
-                {registrationCodes.length > 0 && <span className="count-badge">{registrationCodes.length}</span>}
-              </h2>
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowCreateCode(true); }}
-                className="send-btn"
-                style={{ padding: '0.5rem 1rem', fontSize: '0.9rem' }}
-              >
-                + New Code
-              </button>
-            </div>
+            {/* Registration Codes Section */}
+            {superadminSection === 'codes' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    Registration Codes
+                    {registrationCodes.length > 0 && <span className="count-badge">{registrationCodes.length}</span>}
+                  </h2>
+                  <button
+                    onClick={() => setShowCreateCode(true)}
+                    className="send-btn admin-btn"
+                  >
+                    + New Code
+                  </button>
+                </div>
 
-            {regCodesExpanded && (
-              <div className="admin-codes-list">
-                {regCodesLoading ? (
-                  <div className="no-transactions">Loading codes...</div>
-                ) : registrationCodes.length === 0 ? (
-                  <div className="no-transactions">No registration codes found</div>
-                ) : (
-                  <div className="admin-users-table">
-                    <div className="admin-table-header">
-                      <span>Code</span>
-                      <span>Uses</span>
-                      <span>Status</span>
+                <div className="admin-codes-list">
+                  {regCodesLoading ? (
+                    <div className="no-transactions">Loading codes...</div>
+                  ) : registrationCodes.length === 0 ? (
+                    <div className="no-transactions">No registration codes found</div>
+                  ) : (
+                    <div className="admin-users-table">
+                      <div className="admin-table-header">
+                        <span>Code</span>
+                        <span>Type</span>
+                        <span>Uses</span>
+                        <span>Status</span>
                       <span>Actions</span>
                     </div>
                     {registrationCodes.map((code) => (
                       <div key={code.id} className="admin-table-row">
                         <span className="admin-cell">
                           <code style={{ fontFamily: 'monospace', fontWeight: 'bold' }}>{code.code}</code>
+                        </span>
+                        <span className="admin-cell">
+                          {code.codeType === 'reserved_username' ? (
+                            <span>
+                              <span style={{ background: 'rgba(99, 102, 241, 0.15)', color: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem' }}>Reserved</span>
+                              {code.reservedUsername && (
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{code.reservedUsername}</div>
+                              )}
+                            </span>
+                          ) : (
+                            <span style={{ background: 'rgba(40, 167, 69, 0.15)', color: '#28a745', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem' }}>General</span>
+                          )}
                         </span>
                         <span className="admin-cell">
                           {code.maxUses - code.usesRemaining} / {code.maxUses}
@@ -2392,49 +3862,97 @@ function App() {
                         </span>
                       </div>
                     ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* DAR Upload Section */}
+            {superadminSection === 'packages' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>
+                    Daml Packages
+                    {packageIds.length > 0 && <span className="count-badge">{packageIds.length}</span>}
+                  </h2>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      onClick={() => setShowInstallFromUrl(true)}
+                      className="send-btn admin-btn"
+                      disabled={darUploading}
+                    >
+                      Install from URL
+                    </button>
+                    <label
+                      className="send-btn admin-btn"
+                      style={{ cursor: darUploading ? 'not-allowed' : 'pointer' }}
+                    >
+                      {darUploading ? 'Uploading...' : '+ Upload DAR'}
+                      <input
+                        type="file"
+                        accept=".dar"
+                        onChange={handleDarUpload}
+                        disabled={darUploading}
+                        style={{ display: 'none' }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Install from URL form */}
+                {showInstallFromUrl && (
+                  <div className="modal-backdrop" onClick={() => setShowInstallFromUrl(false)}>
+                    <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                      <h3>Install DAR from URL</h3>
+                      <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                        Enter the base URL of the app. The DAR will be fetched from <code>/api/package</code>.
+                      </p>
+                      <div className="form-group">
+                        <label>App URL</label>
+                        <input
+                          type="url"
+                          value={darInstallUrl}
+                          onChange={(e) => setDarInstallUrl(e.target.value)}
+                          placeholder="https://example.com"
+                          disabled={darUploading}
+                        />
+                      </div>
+                      <div className="modal-actions">
+                        <button
+                          onClick={() => {
+                            setShowInstallFromUrl(false);
+                            setDarInstallUrl('');
+                          }}
+                          className="cancel-btn"
+                          disabled={darUploading}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleDarInstallFromUrl}
+                          className="send-btn admin-btn"
+                          disabled={darUploading || !darInstallUrl.trim()}
+                        >
+                          {darUploading ? 'Installing...' : 'Install'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
-              </div>
-            )}
-          </section>
 
-          {/* DAR Upload Section - Collapsible */}
-          <section className="admin-card">
-            <div className="admin-card-header clickable" onClick={toggleDarDropdown}>
-              <h2>
-                <span className={`dropdown-arrow ${darExpanded ? 'expanded' : ''}`}>▶</span>
-                Daml Packages
-                {packageIds.length > 0 && <span className="count-badge">{packageIds.length}</span>}
-              </h2>
-              <label
-                className="send-btn"
-                style={{ padding: '0.5rem 1rem', fontSize: '0.9rem', cursor: darUploading ? 'not-allowed' : 'pointer' }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {darUploading ? 'Uploading...' : '+ Upload DAR'}
-                <input
-                  type="file"
-                  accept=".dar"
-                  onChange={handleDarUpload}
-                  disabled={darUploading}
-                  style={{ display: 'none' }}
-                />
-              </label>
-            </div>
+                {darUploadStatus && (
+                  <div className={`transfer-status ${darUploadStatus.includes('Error') ? 'error' : 'success'}`} style={{ marginBottom: '1rem' }}>
+                    {darUploadStatus}
+                  </div>
+                )}
 
-            {darUploadStatus && (
-              <div className={`transfer-status ${darUploadStatus.includes('Error') ? 'error' : 'success'}`} style={{ marginBottom: '1rem' }}>
-                {darUploadStatus}
-              </div>
-            )}
-
-            {darExpanded && (
-              <div className="admin-packages-list">
-                {packagesLoading ? (
-                  <div className="no-transactions">Loading packages...</div>
-                ) : packageIds.length === 0 ? (
-                  <div className="no-transactions">No packages found</div>
-                ) : (
+                <div className="admin-packages-list">
+                  {packagesLoading ? (
+                    <div className="no-transactions">Loading packages...</div>
+                  ) : packageIds.length === 0 ? (
+                    <div className="no-transactions">No packages found</div>
+                  ) : (
                   <div className="packages-grid">
                     {packageIds.map((pkgId) => (
                       <div key={pkgId} className="package-item">
@@ -2454,59 +3972,674 @@ function App() {
                     ))}
                   </div>
                 )}
+                </div>
+              </section>
+            )}
+
+            {/* RPC Endpoints Section */}
+            {superadminSection === 'rpc' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>RPC Endpoints</h2>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    {/* Network Toggle */}
+                    <div className="rpc-network-toggle" style={{ marginRight: '0.5rem' }}>
+                      <button
+                        className={`toggle-btn ${rpcNetworkMode === 'mainnet' ? 'active' : ''}`}
+                        onClick={() => setRpcNetworkMode('mainnet')}
+                      >
+                        <span className="toggle-indicator mainnet"></span>
+                        Mainnet
+                      </button>
+                      <button
+                        className={`toggle-btn ${rpcNetworkMode === 'testnet' ? 'active' : ''}`}
+                        onClick={() => setRpcNetworkMode('testnet')}
+                      >
+                        <span className="toggle-indicator testnet"></span>
+                        Testnet
+                      </button>
+                    </div>
+                    {superadminUser.isSuperadmin && (
+                      <button
+                        onClick={() => {
+                          // Initialize with first available chain
+                          if (availableChains.length > 0) {
+                            const first = availableChains[0];
+                            setNewRpc({
+                              chain_type: first.chain_type,
+                              chain_name: first.chain,
+                              chain_id: first.chain_id || '',
+                              network: 'mainnet',
+                              name: '',
+                              rpc_url: '',
+                              priority: 0,
+                              is_enabled: true
+                            });
+                          }
+                          setShowAddRpc(true);
+                        }}
+                        className="send-btn admin-btn"
+                      >
+                        + Add RPC
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="section-content">
+                  {rpcLoading ? (
+                    <div className="loading-msg">Loading RPC endpoints...</div>
+                  ) : rpcEndpoints.length === 0 ? (
+                    <div className="empty-msg">No RPC endpoints configured. Click "Add RPC" to add one.</div>
+                  ) : (
+                    <div className="rpc-table-container">
+                      <table className="admin-table">
+                        <thead>
+                          <tr>
+                            <th>Chain</th>
+                            <th>Chain ID</th>
+                            <th>Provider</th>
+                            <th>RPC URL</th>
+                            <th>Priority</th>
+                            <th>Status</th>
+                            {superadminUser.isSuperadmin && <th>Actions</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rpcEndpoints
+                            .filter(ep => ep.network === rpcNetworkMode)
+                            .map(ep => (
+                              <tr key={ep.id} className={ep.is_enabled === 0 ? 'disabled-row' : ''}>
+                                <td>
+                                  <span className="chain-badge" title={ep.chain_type.toUpperCase()}>{ep.chain_name || ep.chain_type.toUpperCase()}</span>
+                                </td>
+                                <td>{ep.chain_id || '-'}</td>
+                                <td>{ep.name || '-'}</td>
+                                <td>
+                                  <code className="rpc-url-cell" title={ep.rpc_url}>
+                                    {ep.rpc_url.length > 45 ? ep.rpc_url.slice(0, 45) + '...' : ep.rpc_url}
+                                  </code>
+                                </td>
+                                <td>{ep.priority}</td>
+                                <td>
+                                  <button
+                                    onClick={() => handleToggleRpcEnabled(ep)}
+                                    className={`status-badge ${ep.is_enabled ? 'enabled' : 'disabled'}`}
+                                    disabled={!superadminUser.isSuperadmin}
+                                  >
+                                    {ep.is_enabled ? 'Enabled' : 'Disabled'}
+                                  </button>
+                                </td>
+                                {superadminUser.isSuperadmin && (
+                                  <td>
+                                    <div className="action-buttons">
+                                      <button
+                                        onClick={() => setEditingRpc(ep)}
+                                        className="btn-edit"
+                                        title="Edit"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteRpc(ep.id)}
+                                        className="btn-delete"
+                                        title="Delete"
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  </td>
+                                )}
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Add RPC Modal */}
+            {showAddRpc && (
+              <div className="modal-overlay" onClick={() => setShowAddRpc(false)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                  <h2>Add RPC Endpoint</h2>
+                  <form onSubmit={handleAddRpc}>
+                    <div className="form-group">
+                      <label>Chain</label>
+                      <select
+                        value={`${newRpc.chain_type}:${newRpc.chain_name}`}
+                        onChange={(e) => {
+                          const parts = e.target.value.split(':');
+                          const chainType = parts[0];
+                          const chainName = parts.slice(1).join(':'); // Handle chain names with colons
+                          const selectedChain = availableChains.find(c => c.chain_type === chainType && c.chain === chainName);
+                          setNewRpc({
+                            ...newRpc,
+                            chain_type: chainType,
+                            chain_name: chainName,
+                            chain_id: selectedChain?.chain_id || ''
+                          });
+                        }}
+                        required
+                        disabled={availableChains.length === 0}
+                      >
+                        {availableChains.length === 0 ? (
+                          <option value="">Loading chains...</option>
+                        ) : (
+                          availableChains.map(c => (
+                            <option key={`${c.chain_type}:${c.chain}`} value={`${c.chain_type}:${c.chain}`}>
+                              {c.chain} ({c.chain_type.toUpperCase()}{c.chain_id ? ` - ${c.chain_id}` : ''})
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Network</label>
+                      <select
+                        value={newRpc.network}
+                        onChange={(e) => setNewRpc({...newRpc, network: e.target.value})}
+                        required
+                      >
+                        <option value="mainnet">Mainnet</option>
+                        <option value="testnet">Testnet</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Name (optional)</label>
+                      <input
+                        type="text"
+                        value={newRpc.name}
+                        onChange={(e) => setNewRpc({...newRpc, name: e.target.value})}
+                        placeholder="e.g., ZAN.top Ethereum Mainnet"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>RPC URL</label>
+                      <input
+                        type="url"
+                        value={newRpc.rpc_url}
+                        onChange={(e) => setNewRpc({...newRpc, rpc_url: e.target.value})}
+                        placeholder="https://..."
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Priority</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newRpc.priority}
+                        onChange={(e) => setNewRpc({...newRpc, priority: parseInt(e.target.value) || 0})}
+                      />
+                      <small>Lower = higher priority (0 = primary)</small>
+                    </div>
+                    <div className="modal-buttons">
+                      <button type="button" onClick={() => setShowAddRpc(false)} className="refresh-btn">
+                        Cancel
+                      </button>
+                      <button type="submit" className="send-btn admin-btn">
+                        Add Endpoint
+                      </button>
+                    </div>
+                  </form>
+                </div>
               </div>
             )}
-          </section>
-        </main>
 
-        {/* Create Code Modal */}
-        {showCreateCode && (
-          <div className="modal-overlay" onClick={() => setShowCreateCode(false)}>
+            {/* Edit RPC Modal */}
+            {editingRpc && (
+              <div className="modal-overlay" onClick={() => setEditingRpc(null)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                  <h2>Edit RPC Endpoint</h2>
+                  <form onSubmit={handleUpdateRpc}>
+                    <div className="form-group">
+                      <label>Chain</label>
+                      <select
+                        value={`${editingRpc.chain_type}:${editingRpc.chain_name}`}
+                        onChange={(e) => {
+                          const parts = e.target.value.split(':');
+                          const chainType = parts[0];
+                          const chainName = parts.slice(1).join(':');
+                          const selectedChain = availableChains.find(c => c.chain_type === chainType && c.chain === chainName);
+                          setEditingRpc({
+                            ...editingRpc,
+                            chain_type: chainType,
+                            chain_name: chainName,
+                            chain_id: selectedChain?.chain_id || null
+                          });
+                        }}
+                        required
+                      >
+                        {availableChains.map(c => (
+                          <option key={`${c.chain_type}:${c.chain}`} value={`${c.chain_type}:${c.chain}`}>
+                            {c.chain} ({c.chain_type.toUpperCase()}{c.chain_id ? ` - ${c.chain_id}` : ''})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Network</label>
+                      <select
+                        value={editingRpc.network}
+                        onChange={(e) => setEditingRpc({...editingRpc, network: e.target.value})}
+                        required
+                      >
+                        <option value="mainnet">Mainnet</option>
+                        <option value="testnet">Testnet</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Name (optional)</label>
+                      <input
+                        type="text"
+                        value={editingRpc.name || ''}
+                        onChange={(e) => setEditingRpc({...editingRpc, name: e.target.value || null})}
+                        placeholder="e.g., ZAN.top Ethereum Mainnet"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>RPC URL</label>
+                      <input
+                        type="url"
+                        value={editingRpc.rpc_url}
+                        onChange={(e) => setEditingRpc({...editingRpc, rpc_url: e.target.value})}
+                        placeholder="https://..."
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Priority</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={editingRpc.priority}
+                        onChange={(e) => setEditingRpc({...editingRpc, priority: parseInt(e.target.value) || 0})}
+                      />
+                    </div>
+                    <div className="modal-buttons">
+                      <button type="button" onClick={() => setEditingRpc(null)} className="refresh-btn">
+                        Cancel
+                      </button>
+                      <button type="submit" className="send-btn admin-btn">
+                        Update Endpoint
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* Dock Apps Section */}
+            {superadminSection === 'apps' && (
+              <section className="admin-card">
+                <div className="admin-card-header">
+                  <h2>Dock Apps</h2>
+                  {superadminUser.isSuperadmin && (
+                    <button
+                      onClick={() => setShowAddApp(true)}
+                      className="send-btn admin-btn"
+                    >
+                      + Add App
+                    </button>
+                  )}
+                </div>
+
+                <div className="section-content">
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    Apps added here will appear in the dock. URLs are automatically allowed as iframe origins.
+                  </p>
+                  {appsLoading ? (
+                    <div className="loading-msg">Loading apps...</div>
+                  ) : appsList.length === 0 ? (
+                    <div className="empty-msg">No apps configured. Click "Add App" to add one.</div>
+                  ) : (
+                    <div className="rpc-table-container">
+                      <table className="admin-table">
+                        <thead>
+                          <tr>
+                            <th>Icon</th>
+                            <th>Name</th>
+                            <th>URL</th>
+                            <th>Order</th>
+                            <th>Status</th>
+                            {superadminUser.isSuperadmin && <th>Actions</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {appsList.map(app => {
+                            const pkgStatus = appPackageStatus[app.id];
+                            return (
+                            <tr key={app.id} className={app.is_enabled === 0 ? 'disabled-row' : ''}>
+                              <td>
+                                <span
+                                  className="app-icon-preview"
+                                  style={{ backgroundColor: app.color }}
+                                >
+                                  {app.icon}
+                                </span>
+                              </td>
+                              <td>{app.name}</td>
+                              <td>
+                                {app.url ? (
+                                  <code className="rpc-url-cell" title={app.url}>
+                                    {app.url.length > 40 ? app.url.slice(0, 40) + '...' : app.url}
+                                  </code>
+                                ) : (
+                                  <span style={{ color: 'var(--text-secondary)' }}>Built-in</span>
+                                )}
+                              </td>
+                              <td>{app.sort_order}</td>
+                              <td>
+                                <button
+                                  onClick={() => handleToggleAppEnabled(app)}
+                                  className={`status-badge ${app.is_enabled ? 'enabled' : 'disabled'}`}
+                                  disabled={!superadminUser.isSuperadmin}
+                                >
+                                  {app.is_enabled ? 'Enabled' : 'Disabled'}
+                                </button>
+                              </td>
+                              {superadminUser.isSuperadmin && (
+                                <td>
+                                  <div className="action-buttons">
+                                    {app.url && (
+                                      pkgStatus?.status === 'na' ? (
+                                        <span className="status-na" title={pkgStatus.message}>N/A</span>
+                                      ) : (
+                                        <button
+                                          onClick={() => checkAndInstallAppPackage(app.id, app.url!)}
+                                          className={`btn-install ${pkgStatus?.status === 'ready' ? 'success' : ''} ${pkgStatus?.status === 'not_installed' ? 'warning' : ''}`}
+                                          title={pkgStatus?.status === 'ready' ? 'Package installed' : 'Install DAR Package'}
+                                          disabled={pkgStatus?.status === 'checking' || pkgStatus?.status === 'installing' || pkgStatus?.status === 'ready'}
+                                        >
+                                          {pkgStatus?.status === 'checking' ? 'Checking...' :
+                                           pkgStatus?.status === 'installing' ? 'Installing...' :
+                                           pkgStatus?.status === 'ready' ? 'Installed' :
+                                           pkgStatus?.status === 'not_installed' ? 'Install DAR' :
+                                           pkgStatus?.status === 'error' ? 'Retry' :
+                                           'Check'}
+                                        </button>
+                                      )
+                                    )}
+                                    <button
+                                      onClick={() => setEditingApp(app)}
+                                      className="btn-edit"
+                                      title="Edit"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteApp(app.id)}
+                                      className="btn-delete"
+                                      title="Delete"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                  {pkgStatus?.status === 'error' && (
+                                    <div className="error-hint" title={pkgStatus.message}>
+                                      {pkgStatus.message}
+                                    </div>
+                                  )}
+                                </td>
+                              )}
+                            </tr>
+                          );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* Add App Modal */}
+            {showAddApp && (
+              <div className="modal-overlay" onClick={() => setShowAddApp(false)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                  <h2>Add Dock App</h2>
+                  <form onSubmit={handleAddApp}>
+                    <div className="form-group">
+                      <label>ID (optional, auto-generated if empty)</label>
+                      <input
+                        type="text"
+                        value={newApp.id}
+                        onChange={(e) => setNewApp({...newApp, id: e.target.value})}
+                        placeholder="e.g., my-app"
+                        pattern="[a-z0-9_-]*"
+                        title="Only lowercase letters, numbers, hyphens, and underscores"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Name</label>
+                      <input
+                        type="text"
+                        value={newApp.name}
+                        onChange={(e) => setNewApp({...newApp, name: e.target.value})}
+                        placeholder="e.g., My App"
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Icon (emoji or character)</label>
+                      <input
+                        type="text"
+                        value={newApp.icon}
+                        onChange={(e) => setNewApp({...newApp, icon: e.target.value})}
+                        placeholder="e.g., 🚀"
+                        required
+                        maxLength={4}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Color (hex)</label>
+                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <input
+                          type="color"
+                          value={newApp.color}
+                          onChange={(e) => setNewApp({...newApp, color: e.target.value})}
+                          style={{ width: '50px', height: '36px', padding: 0, border: 'none' }}
+                        />
+                        <input
+                          type="text"
+                          value={newApp.color}
+                          onChange={(e) => setNewApp({...newApp, color: e.target.value})}
+                          placeholder="#6366f1"
+                          pattern="#[0-9A-Fa-f]{6}"
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label>URL (optional - leave empty for built-in apps)</label>
+                      <input
+                        type="url"
+                        value={newApp.url}
+                        onChange={(e) => setNewApp({...newApp, url: e.target.value})}
+                        placeholder="https://..."
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Sort Order</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newApp.sort_order}
+                        onChange={(e) => setNewApp({...newApp, sort_order: parseInt(e.target.value) || 0})}
+                      />
+                      <small>Lower numbers appear first</small>
+                    </div>
+                    <div className="modal-buttons">
+                      <button type="button" onClick={() => setShowAddApp(false)} className="refresh-btn">
+                        Cancel
+                      </button>
+                      <button type="submit" className="send-btn admin-btn">
+                        Add App
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* Edit App Modal */}
+            {editingApp && (
+              <div className="modal-overlay" onClick={() => setEditingApp(null)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                  <h2>Edit Dock App</h2>
+                  <form onSubmit={handleUpdateApp}>
+                    <div className="form-group">
+                      <label>ID</label>
+                      <input
+                        type="text"
+                        value={editingApp.id}
+                        disabled
+                        style={{ opacity: 0.6 }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Name</label>
+                      <input
+                        type="text"
+                        value={editingApp.name}
+                        onChange={(e) => setEditingApp({...editingApp, name: e.target.value})}
+                        placeholder="e.g., My App"
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Icon (emoji or character)</label>
+                      <input
+                        type="text"
+                        value={editingApp.icon}
+                        onChange={(e) => setEditingApp({...editingApp, icon: e.target.value})}
+                        placeholder="e.g., 🚀"
+                        required
+                        maxLength={4}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Color (hex)</label>
+                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <input
+                          type="color"
+                          value={editingApp.color}
+                          onChange={(e) => setEditingApp({...editingApp, color: e.target.value})}
+                          style={{ width: '50px', height: '36px', padding: 0, border: 'none' }}
+                        />
+                        <input
+                          type="text"
+                          value={editingApp.color}
+                          onChange={(e) => setEditingApp({...editingApp, color: e.target.value})}
+                          placeholder="#6366f1"
+                          pattern="#[0-9A-Fa-f]{6}"
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label>URL (optional)</label>
+                      <input
+                        type="url"
+                        value={editingApp.url || ''}
+                        onChange={(e) => setEditingApp({...editingApp, url: e.target.value || null})}
+                        placeholder="https://..."
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Sort Order</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={editingApp.sort_order}
+                        onChange={(e) => setEditingApp({...editingApp, sort_order: parseInt(e.target.value) || 0})}
+                      />
+                    </div>
+                    <div className="modal-buttons">
+                      <button type="button" onClick={() => setEditingApp(null)} className="refresh-btn">
+                        Cancel
+                      </button>
+                      <button type="submit" className="send-btn admin-btn">
+                        Update App
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+
+        {/* Create Admin User Modal */}
+        {showCreateAdminUser && (
+          <div className="modal-overlay" onClick={() => setShowCreateAdminUser(false)}>
             <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-              <h2>Create Registration Code</h2>
-              <form onSubmit={handleCreateCode}>
+              <h2>Create Admin User</h2>
+              <form onSubmit={handleCreateAdminUser}>
                 <div className="form-group">
-                  <label>Max Uses</label>
+                  <label>Username (required)</label>
                   <input
-                    type="number"
-                    value={newCodeMaxUses}
-                    onChange={(e) => setNewCodeMaxUses(e.target.value)}
-                    placeholder="e.g., 10"
-                    min="1"
+                    type="text"
+                    value={newAdminUsername}
+                    onChange={(e) => setNewAdminUsername(e.target.value)}
+                    placeholder="e.g., admin1"
                     required
+                    pattern="[a-z0-9_-]+"
+                    title="Only lowercase letters, numbers, hyphens, and underscores"
                   />
                 </div>
                 <div className="form-group">
-                  <label>Expiry Date (optional)</label>
+                  <label>Password (required)</label>
                   <input
-                    type="datetime-local"
-                    value={newCodeExpiry}
-                    onChange={(e) => setNewCodeExpiry(e.target.value)}
+                    type="password"
+                    value={newAdminPassword}
+                    onChange={(e) => setNewAdminPassword(e.target.value)}
+                    placeholder="Enter password"
+                    required
+                    minLength={6}
                   />
+                </div>
+                <div className="form-group">
+                  <label>Display Name (optional)</label>
+                  <input
+                    type="text"
+                    value={newAdminDisplayName}
+                    onChange={(e) => setNewAdminDisplayName(e.target.value)}
+                    placeholder="e.g., Admin User"
+                  />
+                </div>
+                <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <input
+                    type="checkbox"
+                    id="isSuperadmin"
+                    checked={newAdminIsSuperadmin}
+                    onChange={(e) => setNewAdminIsSuperadmin(e.target.checked)}
+                    style={{ width: 'auto' }}
+                  />
+                  <label htmlFor="isSuperadmin" style={{ cursor: 'pointer' }}>Grant Superadmin Privileges</label>
                 </div>
                 <div className="modal-buttons">
                   <button
                     type="button"
                     onClick={() => {
-                      setShowCreateCode(false);
-                      setNewCodeMaxUses('10');
-                      setNewCodeExpiry('');
-                      setCreateCodeStatus('');
+                      setShowCreateAdminUser(false);
+                      setNewAdminUsername('');
+                      setNewAdminPassword('');
+                      setNewAdminDisplayName('');
+                      setNewAdminIsSuperadmin(false);
                     }}
                     className="refresh-btn"
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="send-btn">
-                    Create Code
+                  <button type="submit" className="send-btn admin-btn">
+                    Create Admin
                   </button>
                 </div>
               </form>
-              {createCodeStatus && (
-                <div className={`transfer-status ${createCodeStatus.includes('Error') ? 'error' : 'success'}`}>
-                  {createCodeStatus}
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -2551,7 +4684,7 @@ function App() {
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="send-btn">
+                  <button type="submit" className="send-btn admin-btn">
                     Create Party
                   </button>
                 </div>
@@ -2559,6 +4692,83 @@ function App() {
               {createUserStatus && (
                 <div className={`transfer-status ${createUserStatus.includes('Error') ? 'error' : 'success'}`}>
                   {createUserStatus}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Create Code Modal */}
+        {showCreateCode && (
+          <div className="modal-overlay" onClick={() => setShowCreateCode(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <h2>Create Registration Code</h2>
+              <form onSubmit={handleCreateCode}>
+                <div className="form-group">
+                  <label>Code Type</label>
+                  <select
+                    value={newCodeType}
+                    onChange={(e) => setNewCodeType(e.target.value as 'general' | 'reserved_username')}
+                  >
+                    <option value="general">General</option>
+                    <option value="reserved_username">Reserved Username</option>
+                  </select>
+                </div>
+                {newCodeType === 'reserved_username' && (
+                  <div className="form-group">
+                    <label>Reserved Username</label>
+                    <input
+                      type="text"
+                      value={newCodeReservedUsername}
+                      onChange={(e) => setNewCodeReservedUsername(e.target.value)}
+                      placeholder="e.g., alice"
+                      required
+                    />
+                    <small style={{ color: 'var(--text-secondary)' }}>Only this username can register with this code</small>
+                  </div>
+                )}
+                <div className="form-group">
+                  <label>Max Uses</label>
+                  <input
+                    type="number"
+                    value={newCodeMaxUses}
+                    onChange={(e) => setNewCodeMaxUses(e.target.value)}
+                    placeholder="e.g., 10"
+                    min="1"
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Expiry Date (optional)</label>
+                  <input
+                    type="datetime-local"
+                    value={newCodeExpiry}
+                    onChange={(e) => setNewCodeExpiry(e.target.value)}
+                  />
+                </div>
+                <div className="modal-buttons">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCreateCode(false);
+                      setNewCodeMaxUses('10');
+                      setNewCodeExpiry('');
+                      setNewCodeType('general');
+                      setNewCodeReservedUsername('');
+                      setCreateCodeStatus('');
+                    }}
+                    className="refresh-btn"
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="send-btn admin-btn">
+                    Create Code
+                  </button>
+                </div>
+              </form>
+              {createCodeStatus && (
+                <div className={`transfer-status ${createCodeStatus.includes('Error') ? 'error' : 'success'}`}>
+                  {createCodeStatus}
                 </div>
               )}
             </div>
@@ -2592,13 +4802,15 @@ function App() {
 
             {/* Register section - username input + register button */}
             <div className="form-group">
-              <label>Create Account</label>
+              <label>{codeValidation.codeType === 'reserved_username' ? 'Username (set by invite)' : 'Create Account'}</label>
               <input
                 type="text"
                 value={loginUsername}
                 onChange={(e) => setLoginUsername(e.target.value)}
-                placeholder="Choose a username"
-                disabled={!codeValidation.valid}
+                placeholder={codeValidation.codeType === 'reserved_username' ? 'Username set by invite code' : 'Choose a username'}
+                disabled={!codeValidation.valid || codeValidation.codeType === 'reserved_username'}
+                readOnly={codeValidation.codeType === 'reserved_username'}
+                style={codeValidation.codeType === 'reserved_username' ? { opacity: 0.7, cursor: 'not-allowed' } : {}}
               />
             </div>
 
@@ -2610,7 +4822,11 @@ function App() {
                 color: codeValidation.valid ? '#28a745' : '#dc3545'
               }}>
                 {codeValidation.valid ? (
-                  <>Registration code valid ({codeValidation.usesRemaining} uses remaining)</>
+                  codeValidation.codeType === 'reserved_username' ? (
+                    <>Registration code valid - register as {codeValidation.reservedUsername}</>
+                  ) : (
+                    <>Registration code valid ({codeValidation.usesRemaining} uses remaining)</>
+                  )
                 ) : codeValidation.reason === 'no_code' ? (
                   <>Registration code required. Contact admin for a registration link.</>
                 ) : codeValidation.reason === 'invalid_code' ? (
@@ -2687,9 +4903,14 @@ function App() {
           }))}
           chainAddresses={chainAddresses.map(a => ({ ...a, icon: a.icon || '●' }))}
           scannedAddress={transferTo}
+          networkMode={networkMode}
+          onNetworkModeChange={(mode) => {
+            setNetworkMode(mode);
+            localStorage.setItem('walletNetworkMode', mode);
+            loadWalletData(true, mode); // Force refresh balances with new network (pass mode directly to avoid stale state)
+          }}
           onLogout={handleLogout}
-          onNavigateAdmin={() => navigateTo('admin')}
-          onRefresh={loadWalletData}
+          onRefresh={() => loadWalletData(true)}
           onAddAsset={() => setShowAddAssetModal(true)}
           onDeleteAsset={handleDeleteCustomAsset}
           onAcceptOffer={handleAcceptOffer}
@@ -2715,7 +4936,7 @@ function App() {
                 });
                 const data = await response.json() as ApiResponse<{ transactionId: string; status?: string }>;
                 if (data.success && data.data) {
-                  loadWalletData();
+                  loadWalletData(true);
                   if (data.data.status === 'pending_acceptance') {
                     return { success: true, message: 'Transfer offer created! Waiting for recipient to accept.' };
                   }
@@ -2730,7 +4951,14 @@ function App() {
                 return { success: false, message: 'Passkey authentication required for signing' };
               }
 
-              const assetChainType = asset.chainType || 'evm';
+              // For multi-chain assets, look up chainType from the selected chain
+              let assetChainType = asset.chainType || 'evm';
+              if (chain && asset.chains && asset.chains.length > 0) {
+                const selectedChainInfo = asset.chains.find(c => c.chain === chain);
+                if (selectedChainInfo) {
+                  assetChainType = selectedChainInfo.chainType;
+                }
+              }
               const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=${assetChainType}`, {
                 headers: { 'Authorization': `Bearer ${sessionId}` }
               });
@@ -2762,7 +4990,7 @@ function App() {
                     privateKey,
                     evmAddr
                   );
-                  loadWalletData();
+                  loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.transactionHash}` };
                 }
                 case 'btc': {
@@ -2784,7 +5012,7 @@ function App() {
                   const result = await btcSigner.signAndSendTransaction(
                     utxos, to, satoshis, privateKey, btcAddr, fee, 'mainnet'
                   );
-                  loadWalletData();
+                  loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.txid}` };
                 }
                 case 'svm': {
@@ -2792,20 +5020,56 @@ function App() {
                   if (!solAddr) {
                     return { success: false, message: 'No Solana wallet found' };
                   }
-                  // Check balance before sending
-                  const solBalance = await solSigner.getBalance(solAddr, 'mainnet');
-                  const lamports = Math.floor(amountNum * 1e9);
-                  const fee = 5000; // transaction fee
-                  const rentExemptMin = 890880; // minimum rent-exempt balance (~0.00089 SOL)
-                  const minRequired = lamports + fee + rentExemptMin;
 
-                  if (solBalance < minRequired) {
-                    const maxSendable = Math.max(0, solBalance - fee - rentExemptMin) / 1e9;
-                    return { success: false, message: `Insufficient SOL. Balance: ${(solBalance / 1e9).toFixed(6)} SOL. Max sendable: ${maxSendable.toFixed(6)} SOL (need to keep ~0.00089 SOL for rent)` };
+                  // Check if this is a native SOL transfer or SPL token transfer
+                  const isNativeSol = asset.symbol === 'SOL';
+
+                  if (isNativeSol) {
+                    // Native SOL transfer
+                    const solBalance = await solSigner.getBalance(solAddr, 'mainnet');
+                    const lamports = Math.floor(amountNum * 1e9);
+                    const fee = 5000; // transaction fee
+                    const rentExemptMin = 890880; // minimum rent-exempt balance (~0.00089 SOL)
+                    const minRequired = lamports + fee + rentExemptMin;
+
+                    if (solBalance < minRequired) {
+                      const maxSendable = Math.max(0, solBalance - fee - rentExemptMin) / 1e9;
+                      return { success: false, message: `Insufficient SOL. Balance: ${(solBalance / 1e9).toFixed(6)} SOL. Max sendable: ${maxSendable.toFixed(6)} SOL (need to keep ~0.00089 SOL for rent)` };
+                    }
+                    const result = await solSigner.signAndSendTransaction(to, lamports, privateKey, 'mainnet');
+                    loadWalletData(true);
+                    return { success: true, message: `Success! TX: ${result.signature}` };
+                  } else {
+                    // SPL Token transfer (USDC, USDT, etc.)
+                    // Get token mint address from asset chains
+                    const chainInfo = asset.chains?.find(c => c.chain === 'Solana' || c.chainType === 'svm');
+                    const mintAddress = chainInfo?.contractAddress;
+                    if (!mintAddress) {
+                      return { success: false, message: `No Solana contract address found for ${asset.symbol}` };
+                    }
+
+                    // Get token decimals (default to 6 for USDC/USDT)
+                    const decimals = chainInfo?.decimals || 6;
+
+                    // Check token balance
+                    const tokenBalance = await solSigner.getTokenBalance(mintAddress, solAddr, 'mainnet');
+                    const tokenAmount = BigInt(Math.floor(amountNum * Math.pow(10, decimals)));
+
+                    if (tokenBalance < tokenAmount) {
+                      return { success: false, message: `Insufficient ${asset.symbol} balance. Have: ${(Number(tokenBalance) / Math.pow(10, decimals)).toFixed(decimals)} ${asset.symbol}` };
+                    }
+
+                    // Also need some SOL for transaction fees
+                    const solBalance = await solSigner.getBalance(solAddr, 'mainnet');
+                    const minSolForFee = 10000; // ~0.00001 SOL for fee
+                    if (solBalance < minSolForFee) {
+                      return { success: false, message: `Insufficient SOL for transaction fee. Need at least 0.00001 SOL` };
+                    }
+
+                    const result = await solSigner.signAndSendTokenTransfer(to, tokenAmount, mintAddress, privateKey, decimals, 'mainnet');
+                    loadWalletData(true);
+                    return { success: true, message: `Success! TX: ${result.signature}` };
                   }
-                  const result = await solSigner.signAndSendTransaction(to, lamports, privateKey, 'mainnet');
-                  loadWalletData();
-                  return { success: true, message: `Success! TX: ${result.signature}` };
                 }
                 case 'tron': {
                   const tronAddr = chainAddresses.find(a => a.chain === 'Tron')?.address;
@@ -2819,7 +5083,7 @@ function App() {
                     return { success: false, message: `Insufficient TRX balance. Have: ${(trxBalance / 1e6).toFixed(6)} TRX` };
                   }
                   const result = await tronSigner.signAndSendTransaction(to, sun, privateKey, 'mainnet');
-                  loadWalletData();
+                  loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.txID}` };
                 }
                 case 'ton': {
@@ -2834,7 +5098,7 @@ function App() {
                     return { success: false, message: `Insufficient TON balance. Have: ${(Number(tonBalance) / 1e9).toFixed(6)} TON` };
                   }
                   const result = await tonSigner.signAndSendTransaction(to, nanotons, privateKey, undefined, 'mainnet');
-                  loadWalletData();
+                  loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.hash}` };
                 }
                 default:
@@ -2845,7 +5109,103 @@ function App() {
             }
           }}
           onStartQrScanner={startQrScanner}
+          onSettings={() => { setShowSettingsModal(true); loadPasskeys(); }}
+          transactionPagination={transactionPagination}
+          onLoadMoreTransactions={async (offset: number, chainFilter?: string) => {
+            if (!authUser || !sessionId) return;
+            const headers = { 'Authorization': `Bearer ${sessionId}` };
+            const params = new URLSearchParams();
+            params.set('limit', '20');
+            params.set('offset', offset.toString());
+            if (chainFilter) params.set('chain', chainFilter);
+            try {
+              const res = await fetch(`${API_BASE}/api/wallet/transactions?${params.toString()}`, { headers });
+              const data = await res.json() as TransactionsApiResponse;
+              if (data.success && data.data) {
+                if (offset === 0) {
+                  setTransactions(data.data);
+                } else {
+                  setTransactions(prev => [...prev, ...data.data!]);
+                }
+                if (data.pagination) {
+                  setTransactionPagination(data.pagination);
+                }
+              }
+            } catch (error) {
+              console.error('Failed to load more transactions:', error);
+            }
+          }}
         />
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
+          <div className="settings-window" onClick={(e) => e.stopPropagation()}>
+            <div className="app-window-header">
+              <div className="app-window-title">Settings</div>
+              <button className="app-window-close" onClick={() => setShowSettingsModal(false)}>✕</button>
+            </div>
+            <div className="app-window-content">
+              <div className="settings-section-header">
+                <span className="settings-section-label">Passkeys</span>
+                <span className="passkey-count">{passkeys.length}/5</span>
+              </div>
+
+              {settingsError && (
+                <div className="settings-error">{settingsError}</div>
+              )}
+
+              {settingsLoading ? (
+                <div className="settings-loading">Loading...</div>
+              ) : (
+                <div className="passkey-list">
+                  {passkeys.map((pk) => (
+                    <div key={pk.id} className="passkey-item">
+                      <div className="passkey-info">
+                        <span className="passkey-name">{pk.name}</span>
+                        <span className="passkey-meta">
+                          {pk.deviceType === 'singleDevice' ? 'Single device' : 'Multi-device'}
+                          {pk.backedUp && <span className="passkey-synced">Synced</span>}
+                          <span className="passkey-sep">·</span>
+                          {new Date(pk.createdAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <button
+                        className="app-window-close passkey-delete"
+                        onClick={() => handleDeletePasskey(pk.id)}
+                        disabled={deletingPasskeyId === pk.id || passkeys.length <= 1}
+                        title={passkeys.length <= 1 ? 'Cannot delete last passkey' : 'Delete passkey'}
+                      >
+                        {deletingPasskeyId === pk.id ? '·' : '✕'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {passkeys.length < 5 && (
+                <form className="add-passkey-form" onSubmit={(e) => { e.preventDefault(); handleAddPasskey(newPasskeyName); }}>
+                  <input
+                    type="text"
+                    className="add-passkey-input"
+                    placeholder="Passkey name (e.g. MacBook, iPhone)"
+                    value={newPasskeyName}
+                    onChange={(e) => setNewPasskeyName(e.target.value)}
+                    disabled={addingPasskey}
+                  />
+                  <button
+                    type="submit"
+                    className="btn-add-passkey"
+                    disabled={addingPasskey}
+                  >
+                    {addingPasskey ? 'Adding...' : 'Add'}
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* QR Scanner Modal */}
       {showQrScanner && (
@@ -3054,34 +5414,64 @@ function App() {
         if (!app) return null;
         const appUrl = app.url;
         const isVisible = activeApp === appId;
+        const floatState = floatingApps[appId];
+        const isFloating = !!floatState?.floating;
+        // Floating windows are always visible; fullscreen windows only when active
+        const shouldShow = isFloating || isVisible;
 
         return (
           <div
             key={appId}
-            className={`app-window ${isVisible ? 'visible' : 'hidden'}`}
-            style={{ display: isVisible ? 'flex' : 'none' }}
+            className={`app-window ${shouldShow ? 'visible' : 'hidden'} ${isFloating ? 'floating' : ''}`}
+            style={shouldShow ? (isFloating
+              ? { display: 'flex', left: floatState.x, top: floatState.y, width: floatState.width, height: floatState.height, zIndex: focusedApp === appId ? 910 : 901 }
+              : { display: 'flex' }
+            ) : { display: 'none' }}
+            onMouseDown={() => { if (isFloating) setFocusedApp(appId); }}
           >
-            <div className="app-window-header">
+            <div
+              className="app-window-header"
+              onMouseDown={(e) => { if (isFloating) startAppDrag(appId, e); }}
+              onTouchStart={(e) => { if (isFloating) startAppDrag(appId, e); }}
+            >
               <div className="app-window-title">
                 {app.name}
               </div>
-              <button
-                className="app-window-close"
-                onClick={() => {
-                  // Terminate session - remove from open sessions and unregister iframe
-                  setOpenAppSessions(prev => {
-                    const newSet = new Set(prev);
-                    newSet.delete(appId);
-                    return newSet;
-                  });
-                  // Unregister the iframe
-                  registerAppIframe(appId, null);
-                  // Clear active app if this was the active one
-                  if (activeApp === appId) {
-                    setActiveApp(null);
-                  }
-                }}
-              >✕</button>
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <button
+                  className="app-window-float-toggle"
+                  onClick={() => toggleAppFloating(appId)}
+                  title={isFloating ? 'Maximize' : 'Float window'}
+                >
+{isFloating ? (
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg>
+) : (
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2.5" y="3.5" width="7" height="7" rx="1"/><path d="M4.5 3.5V2.5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-1"/></svg>
+)}
+                </button>
+                <button
+                  className="app-window-close"
+                  onClick={() => {
+                    // Terminate session - remove from open sessions and unregister iframe
+                    setOpenAppSessions(prev => {
+                      const newSet = new Set(prev);
+                      newSet.delete(appId);
+                      return newSet;
+                    });
+                    // Unregister the iframe
+                    registerAppIframe(appId, null);
+                    // Clear active app if this was the active one
+                    if (activeApp === appId) {
+                      setActiveApp(null);
+                    }
+                    // Clean up floating state
+                    setFloatingApps(prev => {
+                      const { [appId]: _, ...rest } = prev;
+                      return rest;
+                    });
+                  }}
+                >✕</button>
+              </div>
             </div>
             <div className="app-window-content">
               {/* If app has URL, load in iframe */}
@@ -3162,6 +5552,14 @@ function App() {
                 </>
               )}
             </div>
+            {isFloating && (
+              <div
+                className="app-resize-handle"
+                onMouseDown={(e) => startAppResize(appId, e)}
+                onTouchStart={(e) => startAppResize(appId, e)}
+              />
+
+            )}
           </div>
         );
       })}
@@ -3190,10 +5588,10 @@ function App() {
             placeholder="Ask me anything..."
             className="chat-input"
           />
-          <button type="submit" className="chat-send-btn">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13"/>
-              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          <button type="submit" className="chat-send-btn" aria-label="Send">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M22 2L11 13" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </button>
         </form>

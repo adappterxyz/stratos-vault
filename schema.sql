@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS passkeys (
   device_type TEXT,
   backed_up INTEGER DEFAULT 0,
   transports TEXT,
+  name TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   last_used_at DATETIME,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -84,13 +85,13 @@ CREATE TABLE IF NOT EXISTS assets (
 CREATE TABLE IF NOT EXISTS asset_chains (
   id TEXT PRIMARY KEY,
   asset_id TEXT NOT NULL,
-  chain TEXT NOT NULL,        -- 'Ethereum', 'Tron', 'Solana', 'TON', etc.
-  chain_type TEXT NOT NULL,   -- 'evm', 'tron', 'svm', 'ton', etc.
+  chain TEXT NOT NULL,        -- 'Ethereum', 'Base', 'Tron', 'Solana', 'TON', etc.
+  chain_type TEXT NOT NULL,   -- 'evm', 'tron', 'svm', 'ton', etc. (Base uses 'evm')
   contract_address TEXT,      -- Chain-specific contract address
   decimals INTEGER DEFAULT 18,
   is_enabled INTEGER DEFAULT 1,
   FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
-  UNIQUE(asset_id, chain_type)
+  UNIQUE(asset_id, chain)
 );
 
 -- User custom assets table (user-specific tokens)
@@ -117,6 +118,8 @@ CREATE TABLE IF NOT EXISTS registration_codes (
   uses_remaining INTEGER NOT NULL DEFAULT 1,
   created_by TEXT,
   expires_at DATETIME,
+  code_type TEXT DEFAULT 'general',
+  reserved_username TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 );
@@ -128,6 +131,102 @@ CREATE TABLE IF NOT EXISTS registration_code_uses (
   user_id TEXT NOT NULL,
   used_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (code_id) REFERENCES registration_codes(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Superadmin users table (username/password authentication)
+CREATE TABLE IF NOT EXISTS superadmin_users (
+  id TEXT PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  is_superadmin INTEGER DEFAULT 0,  -- 1 if has superadmin privileges
+  display_name TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT,
+  FOREIGN KEY (created_by) REFERENCES superadmin_users(id) ON DELETE SET NULL
+);
+
+-- Superadmin sessions table
+CREATE TABLE IF NOT EXISTS superadmin_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES superadmin_users(id) ON DELETE CASCADE
+);
+
+-- Configuration overrides table (overrides wrangler.toml values)
+CREATE TABLE IF NOT EXISTS config_overrides (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_by TEXT,
+  FOREIGN KEY (updated_by) REFERENCES superadmin_users(id) ON DELETE SET NULL
+);
+
+-- Dock apps table (replaces DOCK_APPS in wrangler.toml)
+CREATE TABLE IF NOT EXISTS apps (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  icon TEXT NOT NULL,             -- Icon character or emoji
+  color TEXT DEFAULT '#6366f1',   -- Background color (hex)
+  url TEXT,                       -- App URL (null for built-in apps)
+  sort_order INTEGER DEFAULT 0,   -- Display order
+  is_enabled INTEGER DEFAULT 1,   -- Can disable without deleting
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- RPC endpoints table (multi-chain RPC configuration with failover support)
+CREATE TABLE IF NOT EXISTS rpc_endpoints (
+  id TEXT PRIMARY KEY,
+  chain_type TEXT NOT NULL,       -- 'evm', 'btc', 'svm', 'tron', 'ton'
+  chain_name TEXT,                -- Display name matching assets table: 'Ethereum', 'Base', 'Bitcoin', 'Solana', 'Tron', 'TON'
+  chain_id TEXT,                  -- EVM chain ID: '1' (Ethereum), '11155111' (Sepolia), '8453' (Base), etc.
+  network TEXT NOT NULL,          -- 'mainnet' or 'testnet'
+  name TEXT,                      -- Provider-specific name: 'ZAN Ethereum Mainnet'
+  rpc_url TEXT NOT NULL,          -- The actual RPC endpoint URL
+  priority INTEGER DEFAULT 0,     -- Lower number = higher priority (0 = primary, 1 = first fallback, etc.)
+  is_enabled INTEGER DEFAULT 1,   -- Can disable without deleting
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(chain_type, chain_name, network, priority)
+);
+
+-- Transactions table (records all inflow/outflow for user accounts)
+CREATE TABLE IF NOT EXISTS transactions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  tx_hash TEXT,                     -- Blockchain transaction hash or Canton event_id
+  tx_type TEXT NOT NULL,            -- 'send', 'receive', 'swap', 'bridge', 'tap', 'fee'
+  status TEXT DEFAULT 'pending',    -- 'pending', 'confirmed', 'failed'
+
+  -- Asset info
+  asset_symbol TEXT NOT NULL,       -- 'CC', 'ETH', 'USDC', 'BTC', 'SOL', etc.
+  chain TEXT NOT NULL,              -- 'Canton', 'Ethereum', 'Base', 'Bitcoin', 'Solana', 'Tron', 'TON'
+  chain_type TEXT NOT NULL,         -- 'canton', 'evm', 'btc', 'svm', 'tron', 'ton'
+
+  -- Amount info
+  amount TEXT NOT NULL,             -- Amount as string to preserve precision
+  amount_usd TEXT,                  -- USD value at time of transaction (optional)
+  fee TEXT,                         -- Transaction fee
+  fee_asset TEXT,                   -- Fee asset symbol (e.g., 'ETH' for gas)
+
+  -- Parties
+  from_address TEXT,                -- Sender address or party_id
+  to_address TEXT,                  -- Recipient address or party_id
+
+  -- Metadata
+  description TEXT,                 -- User-provided or auto-generated description
+  metadata TEXT,                    -- JSON for extra data (contract calls, swap details, etc.)
+
+  -- Timestamps
+  block_number INTEGER,             -- Block number (for blockchain txs)
+  block_timestamp DATETIME,         -- When the transaction was mined/confirmed
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -149,3 +248,19 @@ CREATE INDEX IF NOT EXISTS idx_assets_symbol ON assets(symbol);
 CREATE INDEX IF NOT EXISTS idx_assets_chain ON assets(chain);
 CREATE INDEX IF NOT EXISTS idx_assets_is_enabled ON assets(is_enabled);
 CREATE INDEX IF NOT EXISTS idx_user_custom_assets_user_id ON user_custom_assets(user_id);
+CREATE INDEX IF NOT EXISTS idx_superadmin_users_username ON superadmin_users(username);
+CREATE INDEX IF NOT EXISTS idx_superadmin_sessions_user_id ON superadmin_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_superadmin_sessions_expires_at ON superadmin_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_chain_network ON rpc_endpoints(chain_type, network);
+CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_priority ON rpc_endpoints(priority);
+CREATE INDEX IF NOT EXISTS idx_apps_sort_order ON apps(sort_order);
+CREATE INDEX IF NOT EXISTS idx_apps_is_enabled ON apps(is_enabled);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_created ON transactions(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_transactions_chain_type ON transactions(chain_type);
+CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+CREATE INDEX IF NOT EXISTS idx_transactions_tx_hash ON transactions(tx_hash);
+
+-- Add Base chain support for ETH (multi-chain ETH)
+-- Note: This assumes an 'eth' asset already exists in the assets table
+-- Run this after assets are seeded: INSERT OR IGNORE INTO asset_chains (id, asset_id, chain, chain_type, contract_address, decimals, is_enabled) SELECT 'eth-base', id, 'Base', 'evm', NULL, 18, 1 FROM assets WHERE symbol = 'ETH';
