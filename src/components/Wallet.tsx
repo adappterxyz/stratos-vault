@@ -74,8 +74,6 @@ interface WalletProps {
   transferOffers: TransferOffer[];
   chainAddresses: ChainAddress[];
   scannedAddress?: string;
-  networkMode: 'mainnet' | 'testnet';
-  onNetworkModeChange: (mode: 'mainnet' | 'testnet') => void;
   onLogout: () => void;
   onRefresh: () => void;
   onAddAsset: () => void;
@@ -97,8 +95,6 @@ export default function Wallet({
   transferOffers,
   chainAddresses,
   scannedAddress,
-  networkMode,
-  onNetworkModeChange,
   onLogout,
   onRefresh,
   onAddAsset,
@@ -111,8 +107,7 @@ export default function Wallet({
   onSettings,
 }: WalletProps) {
   const [walletCollapsed, setWalletCollapsed] = useState(false);
-  const [assetsExpanded, setAssetsExpanded] = useState(true);
-  const [transactionsExpanded, setTransactionsExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<'assets' | 'transactions'>('assets');
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [selectedChain, setSelectedChain] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -183,27 +178,58 @@ export default function Wallet({
               </div>
             </div>
 
-            {/* Assets Section */}
-            <div className="wallet-section">
-              <div className="section-header-row clickable" onClick={() => setAssetsExpanded(!assetsExpanded)}>
-                <div className="section-label">
-                  <span className={`section-arrow ${assetsExpanded ? 'expanded' : ''}`}>▶</span>
-                  Assets ({assets.length})
-                </div>
-                <div className="section-actions" onClick={(e) => e.stopPropagation()}>
-                  <label className="network-switch" title={networkMode === 'mainnet' ? 'Mainnet' : 'Testnet'}>
-                    <input
-                      type="checkbox"
-                      checked={networkMode === 'testnet'}
-                      onChange={(e) => onNetworkModeChange(e.target.checked ? 'testnet' : 'mainnet')}
-                    />
-                    <span className="switch-slider"></span>
-                  </label>
-                  <button onClick={onAddAsset} className="btn-add" title="Add Custom Asset">+</button>
-                  <button onClick={onRefresh} className="btn-refresh" title="Refresh">↻</button>
-                </div>
+            {/* Tab Bar */}
+            <div className="wallet-tabs">
+              <button
+                className={`wallet-tab ${activeTab === 'assets' ? 'active' : ''}`}
+                onClick={() => setActiveTab('assets')}
+              >
+                Assets ({assets.length})
+              </button>
+              <button
+                className={`wallet-tab ${activeTab === 'transactions' ? 'active' : ''}`}
+                onClick={() => setActiveTab('transactions')}
+              >
+                Transactions {transactionPagination ? `(${transactionPagination.total})` : `(${transactions.length})`}
+              </button>
+              <div className="wallet-tab-actions">
+                {activeTab === 'assets' && (
+                  <>
+                    <button onClick={onAddAsset} className="btn-add" title="Add Custom Asset">+</button>
+                    <button onClick={onRefresh} className="btn-refresh" title="Refresh">↻</button>
+                  </>
+                )}
+                {activeTab === 'transactions' && transactionPagination && transactionPagination.total > 10 && (
+                  <button
+                    className="btn-view-all"
+                    onClick={() => setShowAllTransactions(true)}
+                  >
+                    View All
+                  </button>
+                )}
               </div>
-              {assetsExpanded && (
+            </div>
+
+            <div className="wallet-tab-content">
+            {/* Assets Tab */}
+            {activeTab === 'assets' && (
+              <div className="wallet-section">
+                {/* Pending Offers */}
+                {transferOffers.length > 0 && (
+                  <div className="offers-section">
+                    <div className="section-label">Pending ({transferOffers.length})</div>
+                    <div className="offers-list">
+                      {transferOffers.map((offer) => (
+                        <div key={offer.contract_id} className="offer-row">
+                          <span className="offer-amt">{parseFloat(offer.payload.amount.amount).toFixed(4)} CC</span>
+                          <span className="offer-sender">{offer.payload.sender.split('::')[0]}</span>
+                          <button onClick={() => onAcceptOffer(offer.contract_id)} className="btn-accept">Accept</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="assets-list">
                   {assets.map((asset) => (
                     <div
@@ -256,43 +282,13 @@ export default function Wallet({
                     </div>
                   ))}
                 </div>
-              )}
-            </div>
-
-            {/* Pending Offers */}
-            {transferOffers.length > 0 && (
-              <div className="wallet-section">
-                <div className="section-label">Pending ({transferOffers.length})</div>
-                <div className="offers-list">
-                  {transferOffers.map((offer) => (
-                    <div key={offer.contract_id} className="offer-row">
-                      <span className="offer-amt">{parseFloat(offer.payload.amount.amount).toFixed(4)} CC</span>
-                      <span className="offer-sender">{offer.payload.sender.split('::')[0]}</span>
-                      <button onClick={() => onAcceptOffer(offer.contract_id)} className="btn-accept">Accept</button>
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
 
-            {/* Transactions */}
-            <div className="wallet-section">
-              <div className="section-header-row clickable" onClick={() => setTransactionsExpanded(!transactionsExpanded)}>
-                <div className="section-label">
-                  <span className={`section-arrow ${transactionsExpanded ? 'expanded' : ''}`}>▶</span>
-                  Transactions {transactionPagination ? `(${transactionPagination.total})` : `(${transactions.length})`}
-                </div>
-                {transactionsExpanded && transactionPagination && transactionPagination.total > 10 && (
-                  <button
-                    className="btn-view-all"
-                    onClick={(e) => { e.stopPropagation(); setShowAllTransactions(true); }}
-                  >
-                    View All
-                  </button>
-                )}
-              </div>
-              {transactionsExpanded && (
-                transactions.length === 0 ? (
+            {/* Transactions Tab */}
+            {activeTab === 'transactions' && (
+              <div className="wallet-section">
+                {transactions.length === 0 ? (
                   <div className="empty-msg">No transactions</div>
                 ) : (
                   <div className="tx-list">
@@ -300,24 +296,21 @@ export default function Wallet({
                       <div key={tx.id} className={`tx-row ${tx.status === 'pending' ? 'pending' : ''}`}>
                         <span className="tx-icon-wrapper">
                           <TokenIcon symbol={tx.asset} size={20} />
-                        
                         </span>
                         <span className="tx-amt">
                           {tx.type === 'send' ? '−' : '+'}{parseFloat(tx.amount).toFixed(4)} {tx.asset}
                         </span>
                         <span className="tx-chain">{tx.chain}</span>
-                          <span className={`tx-direction ${tx.type}`}>
-                            {tx.type === 'send' ? '↑' : tx.type === 'receive' ? '↓' : tx.type === 'tap' ? '💧' : '↔'}
-                          </span>
+                        <span className={`tx-direction ${tx.type}`}>
+                          {tx.type === 'send' ? '↑' : tx.type === 'receive' ? '↓' : tx.type === 'tap' ? '💧' : '↔'}
+                        </span>
                         <span className="tx-date">{new Date(tx.blockTimestamp || tx.createdAt).toLocaleString()}</span>
-                       
-                        {/* tx.status === 'pending' && <span className="tx-status pending">⏳</span> */}
-                      
                       </div>
                     ))}
                   </div>
-                )
-              )}
+                )}
+              </div>
+            )}
             </div>
           </div>
         </div>

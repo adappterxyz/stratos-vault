@@ -1,0 +1,36 @@
+/*
+ * Theme Index
+ *
+ * Import all available themes. Purple is the default theme.
+ * To add a new theme, create a new CSS file and import it here.
+ *
+ * Available CSS variables for each theme:
+ *   --primary          Main accent color
+ *   --primary-light    Lighter variant of primary
+ *   --primary-dark     Darker variant of primary
+ *   --secondary        Secondary accent color
+ *   --gradient-start   Start color for gradients
+ *   --gradient-end     End color for gradients
+ *   --bg-gradient-start  Background gradient start
+ *   --bg-gradient-end    Background gradient end
+ *   --accent-bg        Accent background (transparent)
+ *   --accent-bg-hover  Accent background on hover
+ *   --accent-border    Accent border color
+ *   --accent-border-hover  Accent border on hover
+ *   --text-primary     Primary text color (defined in purple/default)
+ *   --text-secondary   Secondary text color (defined in purple/default)
+ *   --sidebar-bg-start   Sidebar gradient start
+ *   --sidebar-bg-end     Sidebar gradient end
+ *   --sidebar-toggle-bg  Sidebar toggle background
+ *   --sidebar-toggle-border  Sidebar toggle border
+ *   --sidebar-toggle-hover   Sidebar toggle hover
+ */
+
+@import './purple.css';
+@import './teal.css';
+@import './blue.css';
+@import './orange.css';
+@import './green.css';
+@import './rose.css';
+@import './slate.css';
+@import './light.css';

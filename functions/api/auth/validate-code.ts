@@ -20,7 +20,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     const result = await context.env.DB.prepare(
-      `SELECT id, code, uses_remaining, expires_at
+      `SELECT id, code, uses_remaining, expires_at, code_type, reserved_username
        FROM registration_codes
        WHERE code = ?`
     ).bind(code.toUpperCase()).first();
@@ -57,11 +57,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       });
     }
 
+    const codeType = (result.code_type as string) || 'general';
+    const reservedUsername = result.reserved_username as string | null;
+
     return jsonResponse({
       success: true,
       data: {
         valid: true,
-        usesRemaining: result.uses_remaining
+        usesRemaining: result.uses_remaining,
+        codeType,
+        reservedUsername: codeType === 'reserved_username' ? reservedUsername : null
       }
     });
   } catch (error) {

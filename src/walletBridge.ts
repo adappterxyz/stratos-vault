@@ -35,6 +35,13 @@ export interface ChainAddress {
   icon?: string;
 }
 
+export interface AssetChain {
+  chain: string;
+  chainType: string;
+  contractAddress: string | null;
+  decimals: number;
+}
+
 export interface Asset {
   id?: string;
   symbol: string;
@@ -43,6 +50,8 @@ export interface Asset {
   icon: string | null;
   chain?: string;
   chainType?: string;
+  chains?: AssetChain[];
+  chainBalances?: Record<string, number>;
 }
 
 export interface Transaction {
@@ -80,6 +89,7 @@ export interface CantonContract<T = Record<string, unknown>> {
 export interface CantonQueryParams {
   templateId: string;
   filter?: Record<string, unknown>;
+  readAs?: string[];
 }
 
 export interface CantonCreateParams {
@@ -149,6 +159,105 @@ export interface EIP712TypedData {
 
 export interface SignTypedDataParams {
   typedData: EIP712TypedData;
+}
+
+// Generic/Raw Transaction Types (for DEX swaps)
+export interface SignRawSolanaTransactionParams {
+  transaction: string; // Base64 encoded serialized transaction
+  network?: 'mainnet' | 'devnet';
+}
+
+export interface SignRawSolanaTransactionResult {
+  signedTransaction: string;
+  signature: string;
+}
+
+export interface SendRawSolanaTransactionParams {
+  signedTransaction: string;
+  network?: 'mainnet' | 'devnet';
+}
+
+export interface SendRawSolanaTransactionResult {
+  signature: string;
+  status: 'pending' | 'confirmed' | 'failed';
+}
+
+export interface SignRawTonMessageParams {
+  to: string;
+  value: string;
+  payload?: string; // BOC encoded message body (base64)
+  stateInit?: string;
+  network?: 'mainnet' | 'testnet';
+}
+
+export interface SignRawTonMessageResult {
+  boc: string;
+  hash: string;
+}
+
+export interface SendRawTonMessageParams {
+  boc: string;
+  network?: 'mainnet' | 'testnet';
+}
+
+export interface SendRawTonMessageResult {
+  hash: string;
+  status: 'pending' | 'confirmed' | 'failed';
+}
+
+export interface TriggerTronSmartContractParams {
+  contractAddress: string;
+  functionSelector: string;
+  parameter: string;
+  callValue?: number;
+  feeLimit?: number;
+  network?: 'mainnet' | 'shasta';
+}
+
+export interface TriggerTronSmartContractResult {
+  txID: string;
+  rawTransaction: string;
+  signature: string;
+}
+
+export interface BroadcastTronTransactionParams {
+  signedTransaction: string;
+  network?: 'mainnet' | 'shasta';
+}
+
+export interface BroadcastTronTransactionResult {
+  txID: string;
+  status: 'pending' | 'confirmed' | 'failed';
+}
+
+// Canton User Rights Types
+export type CantonUserRight =
+  | { type: 'actAs'; party: string }
+  | { type: 'readAs'; party: string }
+  | { type: 'participantAdmin' };
+
+export interface GrantUserRightsParams {
+  userId: string;
+  rights: CantonUserRight[];
+}
+
+export interface GrantUserRightsResult {
+  success: boolean;
+  userId: string;
+  grantedRights: CantonUserRight[];
+}
+
+// Chat Agent Types
+export interface ChatAgentParams {
+  message: string;
+  sessionId?: string;
+  name?: string;
+}
+
+export interface ChatAgentResult {
+  reply: string;
+  sessionId: string;
+  conversationId: string;
 }
 
 export interface ConnectionState {
@@ -232,6 +341,17 @@ export interface WalletBridgeCallbacks {
     message?: string;
     network?: 'mainnet' | 'testnet';
   }) => Promise<{ hash: string; status: string }>;
+  // Generic/Raw Transaction Operations (for DEX swaps)
+  onSignRawSolanaTransaction?: (params: SignRawSolanaTransactionParams) => Promise<SignRawSolanaTransactionResult>;
+  onSendRawSolanaTransaction?: (params: SendRawSolanaTransactionParams) => Promise<SendRawSolanaTransactionResult>;
+  onSignRawTonMessage?: (params: SignRawTonMessageParams) => Promise<SignRawTonMessageResult>;
+  onSendRawTonMessage?: (params: SendRawTonMessageParams) => Promise<SendRawTonMessageResult>;
+  onTriggerTronSmartContract?: (params: TriggerTronSmartContractParams) => Promise<TriggerTronSmartContractResult>;
+  onBroadcastTronTransaction?: (params: BroadcastTronTransactionParams) => Promise<BroadcastTronTransactionResult>;
+  // Canton User Rights
+  onGrantUserRights?: (params: GrantUserRightsParams) => Promise<GrantUserRightsResult>;
+  // Chat Agent
+  onChatAgent?: (params: ChatAgentParams) => Promise<ChatAgentResult>;
 }
 
 /**
@@ -246,6 +366,7 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5174',
   // Production app origins
   'https://vault.cantondefi.com',
+  'https://main.stratos-rwa.pages.dev',
 ];
 
 export class WalletBridge {
@@ -259,6 +380,20 @@ export class WalletBridge {
 
     // Listen for messages from iframes
     window.addEventListener('message', this.handleMessage.bind(this));
+  }
+
+  /**
+   * Update callbacks without recreating the bridge (preserves registered iframes)
+   */
+  updateCallbacks(callbacks: Partial<WalletBridgeCallbacks>): void {
+    this.callbacks = { ...this.callbacks, ...callbacks };
+  }
+
+  /**
+   * Get current callbacks (for partial updates)
+   */
+  getCallbacks(): WalletBridgeCallbacks {
+    return this.callbacks;
   }
 
   /**
@@ -457,6 +592,73 @@ export class WalletBridge {
         }
         const typedDataParams = params as SignTypedDataParams;
         return this.callbacks.onSignTypedData(typedDataParams);
+      }
+
+      // Generic/Raw Transaction Operations (for DEX swaps)
+      case 'signRawSolanaTransaction': {
+        if (!this.callbacks.onSignRawSolanaTransaction) {
+          throw new Error('Raw Solana transaction signing not supported');
+        }
+        const solanaSignParams = params as SignRawSolanaTransactionParams;
+        return this.callbacks.onSignRawSolanaTransaction(solanaSignParams);
+      }
+
+      case 'sendRawSolanaTransaction': {
+        if (!this.callbacks.onSendRawSolanaTransaction) {
+          throw new Error('Raw Solana transaction sending not supported');
+        }
+        const solanaSendParams = params as SendRawSolanaTransactionParams;
+        return this.callbacks.onSendRawSolanaTransaction(solanaSendParams);
+      }
+
+      case 'signRawTonMessage': {
+        if (!this.callbacks.onSignRawTonMessage) {
+          throw new Error('Raw TON message signing not supported');
+        }
+        const tonSignParams = params as SignRawTonMessageParams;
+        return this.callbacks.onSignRawTonMessage(tonSignParams);
+      }
+
+      case 'sendRawTonMessage': {
+        if (!this.callbacks.onSendRawTonMessage) {
+          throw new Error('Raw TON message sending not supported');
+        }
+        const tonSendParams = params as SendRawTonMessageParams;
+        return this.callbacks.onSendRawTonMessage(tonSendParams);
+      }
+
+      case 'triggerTronSmartContract': {
+        if (!this.callbacks.onTriggerTronSmartContract) {
+          throw new Error('TRON smart contract triggering not supported');
+        }
+        const tronTriggerParams = params as TriggerTronSmartContractParams;
+        return this.callbacks.onTriggerTronSmartContract(tronTriggerParams);
+      }
+
+      case 'broadcastTronTransaction': {
+        if (!this.callbacks.onBroadcastTronTransaction) {
+          throw new Error('TRON transaction broadcasting not supported');
+        }
+        const tronBroadcastParams = params as BroadcastTronTransactionParams;
+        return this.callbacks.onBroadcastTronTransaction(tronBroadcastParams);
+      }
+
+      // Canton User Rights
+      case 'grantUserRights': {
+        if (!this.callbacks.onGrantUserRights) {
+          throw new Error('User rights granting not supported');
+        }
+        const grantRightsParams = params as GrantUserRightsParams;
+        return this.callbacks.onGrantUserRights(grantRightsParams);
+      }
+
+      // Chat Agent
+      case 'chatAgent': {
+        if (!this.callbacks.onChatAgent) {
+          throw new Error('Chat agent not supported');
+        }
+        const chatParams = params as ChatAgentParams;
+        return this.callbacks.onChatAgent(chatParams);
       }
 
       default:

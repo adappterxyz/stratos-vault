@@ -1,0 +1,25 @@
+/*
+ * Purple Theme (Default)
+ */
+:root,
+.theme-purple {
+  --primary: #8b5cf6;
+  --primary-light: #a78bfa;
+  --primary-dark: #7c3aed;
+  --secondary: #ec4899;
+  --gradient-start: #8b5cf6;
+  --gradient-end: #ec4899;
+  --bg-gradient-start: #1e1e3f;
+  --bg-gradient-end: #2d1b4e;
+  --accent-bg: rgba(139, 92, 246, 0.1);
+  --accent-bg-hover: rgba(139, 92, 246, 0.2);
+  --accent-border: rgba(139, 92, 246, 0.2);
+  --accent-border-hover: rgba(139, 92, 246, 0.3);
+  --text-primary: #e4e4e7;
+  --text-secondary: #a1a1aa;
+  --sidebar-bg-start: rgba(30, 30, 63, 0.98);
+  --sidebar-bg-end: rgba(45, 27, 78, 0.98);
+  --sidebar-toggle-bg: rgba(139, 92, 246, 0.15);
+  --sidebar-toggle-border: rgba(139, 92, 246, 0.3);
+  --sidebar-toggle-hover: rgba(139, 92, 246, 0.25);
+}

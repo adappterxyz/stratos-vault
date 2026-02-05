@@ -10,13 +10,13 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { ripemd160 } from '@noble/hashes/legacy.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
-// ZAN.top RPC endpoints for Bitcoin
-const ZAN_API_KEY = '4a6373aaef354ba88416fbe73cd1c616';
+// RPC endpoints - must be set via setBtcRpcEndpoints() from config
+let btcRpcEndpoints: Record<string, string> = {};
 
-export const BTC_RPC_ENDPOINTS = {
-  mainnet: `https://api.zan.top/node/v1/btc/mainnet/${ZAN_API_KEY}`,
-  testnet: `https://api.zan.top/node/v1/btc/testnet/${ZAN_API_KEY}`,
-};
+// Set RPC endpoints from config
+export function setBtcRpcEndpoints(endpoints: Record<string, string>): void {
+  btcRpcEndpoints = { ...endpoints };
+}
 
 export type BTCNetwork = 'mainnet' | 'testnet';
 
@@ -190,9 +190,9 @@ function uint64LE(n: number): Uint8Array {
   return bytes;
 }
 
-// RPC call to ZAN Bitcoin node
+// RPC call to Bitcoin node
 async function rpcCall(network: BTCNetwork, method: string, params: any[]): Promise<any> {
-  const rpcUrl = BTC_RPC_ENDPOINTS[network];
+  const rpcUrl = btcRpcEndpoints[network];
 
   const response = await fetch(rpcUrl, {
     method: 'POST',
@@ -212,9 +212,8 @@ async function rpcCall(network: BTCNetwork, method: string, params: any[]): Prom
   return result.result;
 }
 
-// Get UTXOs for an address using scantxoutset (if available) or external API
+// Get UTXOs for an address using scantxoutset
 export async function getUTXOs(address: string, network: BTCNetwork = 'mainnet'): Promise<UTXO[]> {
-  // Try scantxoutset first (available on some nodes)
   try {
     const result = await rpcCall(network, 'scantxoutset', ['start', [`addr(${address})`]]);
     if (result && result.unspents) {
@@ -225,32 +224,8 @@ export async function getUTXOs(address: string, network: BTCNetwork = 'mainnet')
         scriptPubKey: utxo.scriptPubKey
       }));
     }
-  } catch {
-    // scantxoutset not available
-  }
-
-  // Fallback to Blockstream API for address UTXOs
-  try {
-    const apiBase = network === 'mainnet'
-      ? 'https://blockstream.info/api'
-      : 'https://blockstream.info/testnet/api';
-
-    const response = await fetch(`${apiBase}/address/${address}/utxo`);
-    if (response.ok) {
-      const utxos = await response.json() as Array<{
-        txid: string;
-        vout: number;
-        value: number;
-        status: { confirmed: boolean };
-      }>;
-      return utxos.map(utxo => ({
-        txid: utxo.txid,
-        vout: utxo.vout,
-        value: utxo.value, // Already in satoshis
-      }));
-    }
-  } catch {
-    console.warn('Blockstream UTXO lookup failed');
+  } catch (err) {
+    console.warn('scantxoutset failed:', err);
   }
 
   return [];
@@ -258,28 +233,7 @@ export async function getUTXOs(address: string, network: BTCNetwork = 'mainnet')
 
 // Get balance for an address
 export async function getBalance(address: string, network: BTCNetwork = 'mainnet'): Promise<number> {
-  // Try Blockstream API directly for balance (more efficient)
-  try {
-    const apiBase = network === 'mainnet'
-      ? 'https://blockstream.info/api'
-      : 'https://blockstream.info/testnet/api';
-
-    const response = await fetch(`${apiBase}/address/${address}`);
-    if (response.ok) {
-      const data = await response.json() as {
-        chain_stats: { funded_txo_sum: number; spent_txo_sum: number };
-        mempool_stats: { funded_txo_sum: number; spent_txo_sum: number };
-      };
-      // Balance = funded - spent (confirmed + mempool)
-      const confirmed = data.chain_stats.funded_txo_sum - data.chain_stats.spent_txo_sum;
-      const mempool = data.mempool_stats.funded_txo_sum - data.mempool_stats.spent_txo_sum;
-      return confirmed + mempool;
-    }
-  } catch {
-    console.warn('Blockstream balance lookup failed');
-  }
-
-  // Fallback to UTXO sum
+  // Use scantxoutset to get UTXOs and sum their values
   const utxos = await getUTXOs(address, network);
   return utxos.reduce((sum, utxo) => sum + utxo.value, 0);
 }
@@ -561,4 +515,131 @@ export async function signAndSendTransaction(
     txid,
     status: 'pending'
   };
+}
+
+/**
+ * BTC Transaction history item
+ */
+export interface BTCTransactionHistory {
+  txid: string;
+  blockHeight: number | null;
+  blockTime: number | null;
+  type: 'send' | 'receive';
+  amount: number; // in satoshis
+  fee: number;
+  from: string[];
+  to: string[];
+  status: 'confirmed' | 'pending';
+}
+
+// Fallback REST API endpoints for transaction history (Blockstream/Mempool style)
+const REST_API_ENDPOINTS: Record<BTCNetwork, string> = {
+  mainnet: 'https://blockstream.info/api',
+  testnet: 'https://blockstream.info/testnet/api'
+};
+
+/**
+ * Get transaction history for a BTC address
+ * Uses Blockstream/Mempool-style REST API since Bitcoin Core RPC doesn't support address history
+ */
+export async function getTransactionHistory(
+  address: string,
+  network: BTCNetwork = 'mainnet',
+  limit: number = 20
+): Promise<BTCTransactionHistory[]> {
+  try {
+    const apiBase = REST_API_ENDPOINTS[network];
+    const response = await fetch(`${apiBase}/address/${address}/txs`);
+
+    if (!response.ok) {
+      console.warn('BTC transaction history API failed:', response.status);
+      return [];
+    }
+
+    const txs = await response.json() as any[];
+    const transactions: BTCTransactionHistory[] = [];
+
+    for (const tx of txs.slice(0, limit)) {
+      const parsed = parseTransaction(tx, address);
+      if (parsed) {
+        transactions.push(parsed);
+      }
+    }
+
+    return transactions;
+  } catch (err) {
+    console.error('Failed to get BTC transaction history:', err);
+    return [];
+  }
+}
+
+/**
+ * Parse a Blockstream-style transaction
+ */
+function parseTransaction(tx: any, walletAddress: string): BTCTransactionHistory | null {
+  try {
+    const fee = tx.fee || 0;
+    const blockHeight = tx.status?.block_height || null;
+    const blockTime = tx.status?.block_time || null;
+
+    // Calculate sent and received amounts
+    let received = 0;
+    let sent = 0;
+    const fromAddresses: string[] = [];
+    const toAddresses: string[] = [];
+
+    // Check inputs (what was spent)
+    for (const vin of tx.vin || []) {
+      const prevAddr = vin.prevout?.scriptpubkey_address;
+      if (prevAddr) {
+        fromAddresses.push(prevAddr);
+        if (prevAddr === walletAddress) {
+          sent += vin.prevout?.value || 0;
+        }
+      }
+    }
+
+    // Check outputs (what was received)
+    for (const vout of tx.vout || []) {
+      const outAddr = vout.scriptpubkey_address;
+      if (outAddr) {
+        toAddresses.push(outAddr);
+        if (outAddr === walletAddress) {
+          received += vout.value || 0;
+        }
+      }
+    }
+
+    // Determine transaction type
+    let type: 'send' | 'receive';
+    let amount: number;
+
+    if (sent > 0 && received > 0) {
+      // Could be a self-transfer or change
+      amount = sent - received - fee;
+      type = amount > 0 ? 'send' : 'receive';
+      amount = Math.abs(amount);
+    } else if (sent > 0) {
+      type = 'send';
+      amount = sent - fee;
+    } else {
+      type = 'receive';
+      amount = received;
+    }
+
+    return {
+      txid: tx.txid,
+      blockHeight,
+      blockTime,
+      type,
+      amount,
+      fee,
+      from: [...new Set(fromAddresses)],
+      to: [...new Set(toAddresses)],
+      status: tx.status?.confirmed ? 'confirmed' : 'pending'
+    };
+  } catch (err) {
+    console.error('Error parsing BTC transaction:', err);
+    return null;
+  }
 }

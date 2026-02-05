@@ -1,0 +1,22 @@
+/*
+ * Orange Theme
+ */
+.theme-orange {
+  --primary: #f97316;
+  --primary-light: #fb923c;
+  --primary-dark: #ea580c;
+  --secondary: #facc15;
+  --gradient-start: #f97316;
+  --gradient-end: #facc15;
+  --bg-gradient-start: #1c1410;
+  --bg-gradient-end: #2d1f15;
+  --accent-bg: rgba(249, 115, 22, 0.1);
+  --accent-bg-hover: rgba(249, 115, 22, 0.2);
+  --accent-border: rgba(249, 115, 22, 0.2);
+  --accent-border-hover: rgba(249, 115, 22, 0.3);
+  --sidebar-bg-start: rgba(28, 20, 16, 0.98);
+  --sidebar-bg-end: rgba(45, 31, 21, 0.98);
+  --sidebar-toggle-bg: rgba(249, 115, 22, 0.15);
+  --sidebar-toggle-border: rgba(249, 115, 22, 0.3);
+  --sidebar-toggle-hover: rgba(249, 115, 22, 0.25);
+}

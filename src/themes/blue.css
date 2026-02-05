@@ -1,0 +1,22 @@
+/*
+ * Blue Theme
+ */
+.theme-blue {
+  --primary: #3b82f6;
+  --primary-light: #60a5fa;
+  --primary-dark: #2563eb;
+  --secondary: #06b6d4;
+  --gradient-start: #3b82f6;
+  --gradient-end: #06b6d4;
+  --bg-gradient-start: #0f172a;
+  --bg-gradient-end: #1e3a5f;
+  --accent-bg: rgba(59, 130, 246, 0.1);
+  --accent-bg-hover: rgba(59, 130, 246, 0.2);
+  --accent-border: rgba(59, 130, 246, 0.2);
+  --accent-border-hover: rgba(59, 130, 246, 0.3);
+  --sidebar-bg-start: rgba(15, 23, 42, 0.98);
+  --sidebar-bg-end: rgba(30, 58, 95, 0.98);
+  --sidebar-toggle-bg: rgba(59, 130, 246, 0.15);
+  --sidebar-toggle-border: rgba(59, 130, 246, 0.3);
+  --sidebar-toggle-hover: rgba(59, 130, 246, 0.25);
+}

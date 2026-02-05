@@ -1,5 +1,5 @@
 import { verifyAuthenticationResponse } from '@simplewebauthn/server';
-import { jsonResponse, errorResponse, handleCors, generateId, Env } from '../../../_lib/utils';
+import { jsonResponse, errorResponse, handleCors, generateId, Env, getCantonJsonClient, getSpliceAdminClient } from '../../../_lib/utils';
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
   const corsResponse = handleCors(context.request);
@@ -72,6 +72,49 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       'DELETE FROM challenges WHERE expires_at < datetime("now")'
     ).run();
 
+    // Re-provision Canton party if user doesn't have one (e.g., after Canton ledger reset)
+    let partyId = passkey.party_id as string | null;
+    const username = passkey.username as string;
+    const displayName = (passkey.display_name || username) as string;
+
+    if (!partyId && username) {
+      try {
+        console.log(`Re-provisioning Canton party for user: ${username}`);
+        const cantonJsonClient = getCantonJsonClient(context.env);
+
+        // Allocate party
+        const partyDetails = await cantonJsonClient.allocateParty(username, displayName);
+        partyId = partyDetails.party;
+        console.log(`Party allocated: ${partyId}`);
+
+        // Create Canton user
+        await cantonJsonClient.createUser(username, partyId, displayName);
+        console.log(`Canton user created: ${username}`);
+
+        // Grant rights
+        await cantonJsonClient.grantRights(username, partyId);
+        console.log(`Rights granted to: ${username}`);
+
+        // Onboard to Splice
+        try {
+          const spliceAdminClient = getSpliceAdminClient(context.env);
+          await spliceAdminClient.onboardUser(partyId, username);
+          console.log(`User onboarded to Splice: ${username}`);
+        } catch (spliceError) {
+          console.warn('Splice onboarding failed (non-fatal):', spliceError);
+        }
+
+        // Update user record with party_id
+        await context.env.DB.prepare(
+          'UPDATE users SET party_id = ? WHERE id = ?'
+        ).bind(partyId, passkey.user_id).run();
+        console.log(`User record updated with party_id: ${partyId}`);
+      } catch (partyError: any) {
+        console.error('Failed to re-provision Canton party during login:', partyError);
+        // Don't fail login - user can try again or admin can fix
+      }
+    }
+
     // Store client-generated wallet addresses if provided
     if (walletAddresses && walletAddresses.length > 0) {
       console.log(`Storing ${walletAddresses.length} client-generated wallet addresses for user: ${passkey.user_id}`);
@@ -113,7 +156,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           id: passkey.user_id,
           username: passkey.username,
           displayName: passkey.display_name,
-          partyId: passkey.party_id,
+          partyId: partyId,  // Use re-provisioned partyId if applicable
           role: passkey.role || 'user'
         }
       }

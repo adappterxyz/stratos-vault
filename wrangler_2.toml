@@ -5,27 +5,19 @@ pages_build_output_dir = "dist"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "canton-wallet-auth"
-database_id = "bab93e48-202f-4a10-bf68-eb30fb2d2824"
+database_name = "p3"
+database_id = "2076a0d8-2914-4073-8bd1-08df6be04447"
 
 [vars]
 SPLICE_HOST = "p2.cantondefi.com"
 SPLICE_PORT = 443
 CANTON_JSON_HOST = "p2-json.cantondefi.com"
 CANTON_JSON_PORT = 443
-CANTON_AUTH_SECRET = "unsafe"
+CANTON_AUTH_SECRET = ""
 CANTON_AUTH_USER = "ledger-api-user"
-SPLICE_ADMIN_USER = "app-provider"
+SPLICE_ADMIN_USER = "app-user"
 CANTON_AUTH_AUDIENCE = "https://canton.network.global"
-RP_ID = "n2.cantondefi.com"
-RP_NAME = "Canton Wallet2"
+RP_ID = "P2"
+RP_NAME = "P2"
 THEME = "teal"
-ORG_NAME = "Organization2"
-
-
-# Dock Apps Configuration (JSON array)
-# Each app: { id, name, icon, color, url (null for placeholder) }
-DOCK_APPS = '[{"id":"swap","name":"Trade","icon":"⇄","color":"#3b82f6","url":"https://swap.cantondefi.com"},{"id":"nft","name":"RWA","icon":"🖼","color":"#8b5cf6","url":"https://rwa.cantondefi.com"},{"id":"defi","name":"DeFi","icon":"📊","color":"#10b981","url":"https://vault.cantondefi.com"},{"id":"vault","name":"Vault","icon":"🔐","color":"#f59e0b","url":"https://vault.cantondefi.com"}]'
-
-# Allowed origins for iframe apps (comma-separated)
-ALLOWED_IFRAME_ORIGINS = "https://swap.cantondefi.com,https://vault.cantondefi.com,https://rwa.cantondefi.com,https://a2f003c8.stratos-vault.pages.dev"
+ORG_NAME = "P2"

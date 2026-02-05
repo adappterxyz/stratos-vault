@@ -1,4 +1,4 @@
-import { getSpliceAdminClient, getCantonJsonClient, jsonResponse, errorResponse, handleCors, requireAuth, validateAdminToken, Env } from '../../_lib/utils';
+import { getSpliceAdminClient, getCantonJsonClient, jsonResponse, errorResponse, handleCors, requireAuth, validateAdminToken, validateSuperadminSession, Env } from '../../_lib/utils';
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const corsResponse = handleCors(context.request);
@@ -7,10 +7,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   try {
     // Check for admin token first
     const adminToken = context.request.headers.get('X-Admin-Token');
+    const superadminToken = context.request.headers.get('X-Superadmin-Token');
+
     if (adminToken) {
       const isValidAdmin = await validateAdminToken(context.env.DB, adminToken);
       if (!isValidAdmin) {
         return errorResponse('Invalid admin token', 401);
+      }
+    } else if (superadminToken) {
+      const superadminUser = await validateSuperadminSession(context.env.DB, superadminToken);
+      if (!superadminUser) {
+        return errorResponse('Invalid superadmin token', 401);
       }
     } else {
       // Fall back to regular session auth

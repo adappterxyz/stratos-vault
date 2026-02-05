@@ -22,7 +22,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     const codeResult = await context.env.DB.prepare(
-      `SELECT id, uses_remaining, expires_at
+      `SELECT id, uses_remaining, expires_at, code_type, reserved_username
        FROM registration_codes
        WHERE code = ?`
     ).bind(registrationCode.toUpperCase()).first();
@@ -37,6 +37,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     if ((codeResult.uses_remaining as number) <= 0) {
       return errorResponse('Registration code has been fully used', 400);
+    }
+
+    // Enforce username match for reserved_username codes
+    if (codeResult.code_type === 'reserved_username' && codeResult.reserved_username) {
+      if (username.trim() !== (codeResult.reserved_username as string).trim()) {
+        return errorResponse('This registration code is reserved for a specific username', 400);
+      }
     }
 
     // Check if user already exists

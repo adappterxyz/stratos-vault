@@ -8,7 +8,13 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "pages:dev": "wrangler pages dev dist",
-    "pages:deploy": "npm run build && wrangler pages deploy dist"
+    "pages:deploy": "npm run build && wrangler pages deploy dist",
+    "deploy": "bash scripts/deploy.sh",
+    "init": "bash scripts/init-instance.sh",
+    "db:create": "wrangler d1 create",
+    "db:migrate": "wrangler d1 execute --remote --file=schema.sql",
+    "db:seed": "wrangler d1 execute --remote --file=scripts/seed-data.sql",
+    "seed:superadmin": "node scripts/seed-superadmin.js"
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",
@@ -22,6 +28,7 @@
     "cryptocurrency-icons": "^0.18.1",
     "html5-qrcode": "^2.3.8",
     "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.562.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
@@ -36,6 +43,6 @@
     "@vitejs/plugin-react": "^5.1.1",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
-    "wrangler": "^3.95.0"
+    "wrangler": "^4.0.0"
   }
 }

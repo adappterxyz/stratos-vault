@@ -1,0 +1,22 @@
+/*
+ * Green Theme
+ */
+.theme-green {
+  --primary: #22c55e;
+  --primary-light: #4ade80;
+  --primary-dark: #16a34a;
+  --secondary: #10b981;
+  --gradient-start: #22c55e;
+  --gradient-end: #10b981;
+  --bg-gradient-start: #0f1f17;
+  --bg-gradient-end: #14332a;
+  --accent-bg: rgba(34, 197, 94, 0.1);
+  --accent-bg-hover: rgba(34, 197, 94, 0.2);
+  --accent-border: rgba(34, 197, 94, 0.2);
+  --accent-border-hover: rgba(34, 197, 94, 0.3);
+  --sidebar-bg-start: rgba(15, 31, 23, 0.98);
+  --sidebar-bg-end: rgba(20, 51, 42, 0.98);
+  --sidebar-toggle-bg: rgba(34, 197, 94, 0.15);
+  --sidebar-toggle-border: rgba(34, 197, 94, 0.3);
+  --sidebar-toggle-hover: rgba(34, 197, 94, 0.25);
+}

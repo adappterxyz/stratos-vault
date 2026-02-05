@@ -13,22 +13,12 @@ SPLICE_HOST = "p1.cantondefi.com"
 SPLICE_PORT = 443
 CANTON_JSON_HOST = "p1-json.cantondefi.com"
 CANTON_JSON_PORT = 443
-CANTON_HOST = "p1-json.cantondefi.com"
-CANTON_PORT = "443"
 CANTON_AUTH_SECRET = "unsafe"
 CANTON_AUTH_USER = "ledger-api-user"
 SPLICE_ADMIN_USER = "app-user"
 CANTON_AUTH_AUDIENCE = "https://canton.network.global"
-OPERATOR_PARTY = ""
-CPCV_PACKAGE_ID = "3e0418bde138fe51f2540b0786dc758069c802041b794e61dd50f498d85ce039"
-RP_ID = "n1.cantondefi.com"
-RP_NAME = "Canton Wallet"
+RP_ID = "P1"
+RP_NAME = "P1"
 THEME = "purple"
-ORG_NAME = "Organization1"
-
-# Dock Apps Configuration (JSON array)
-# Each app: { id, name, icon, color, url (null for placeholder) }
-DOCK_APPS = '[{"id":"swap","name":"Trade","icon":"⇄","color":"#3b82f6","url":"https://swap.cantondefi.com"},{"id":"nft","name":"RWA","icon":"🖼","color":"#8b5cf6","url":"https://rwa.cantondefi.com"},{"id":"defi","name":"Vault","icon":"ꗃ","color":"#10b981","url":"https://vault.cantondefi.com"},{"id":"privamargin","name":"Margin","icon":"⏲","color":"#ec4899","url":"https://privamargin.pages.dev"}]'
-
-# Allowed origins for iframe apps (comma-separated)
-ALLOWED_IFRAME_ORIGINS = "https://swap.cantondefi.com,https://vault.cantondefi.com,https://rwa.cantondefi.com,https://a2f003c8.stratos-vault.pages.dev,https://privamargin.pages.dev"
+ORG_NAME = "P1"
+CHAT_AGENT_WEBHOOK_URL = "https://manage.uranus.im/api/agents/default/webhooks/21fe6eaa-ad83-4601-8780-828c21aa9db4"

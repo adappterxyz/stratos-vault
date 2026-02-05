@@ -230,7 +230,21 @@ CREATE TABLE IF NOT EXISTS transactions (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- User app access control (junction table)
+CREATE TABLE IF NOT EXISTS user_app_access (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  app_id TEXT NOT NULL,
+  granted_by TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (app_id) REFERENCES apps(id) ON DELETE CASCADE,
+  UNIQUE(user_id, app_id)
+);
+
 -- Indexes
+CREATE INDEX IF NOT EXISTS idx_user_app_access_user_id ON user_app_access(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_app_access_app_id ON user_app_access(app_id);
 CREATE INDEX IF NOT EXISTS idx_registration_codes_code ON registration_codes(code);
 CREATE INDEX IF NOT EXISTS idx_registration_code_uses_code_id ON registration_code_uses(code_id);
 CREATE INDEX IF NOT EXISTS idx_passkeys_user_id ON passkeys(user_id);

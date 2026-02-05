@@ -165,6 +165,36 @@ export class CantonJsonClient {
     });
   }
 
+  /**
+   * Grant specific user rights (flexible version)
+   * Supports granting specific actAs/readAs rights
+   */
+  async grantUserRights(
+    userId: string,
+    rights: Array<{ type: 'actAs' | 'readAs'; party: string } | { type: 'participantAdmin' }>
+  ): Promise<{ success: boolean; grantedRights: typeof rights }> {
+    const cantonRights = rights.map(right => {
+      if (right.type === 'actAs') {
+        return { kind: { CanActAs: { value: { party: right.party } } } };
+      } else if (right.type === 'readAs') {
+        return { kind: { CanReadAs: { value: { party: right.party } } } };
+      } else {
+        return { kind: { ParticipantAdmin: {} } };
+      }
+    });
+
+    await this.fetch(`/users/${userId}/rights`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId,
+        identityProviderId: '',
+        rights: cantonRights
+      })
+    });
+
+    return { success: true, grantedRights: rights };
+  }
+
   async listParties(): Promise<PartyDetails[]> {
     const result = await this.fetch<{ partyDetails: PartyDetails[] }>('/parties');
     return result.partyDetails;
@@ -205,19 +235,26 @@ export class CantonJsonClient {
   /**
    * Get current ledger end offset
    */
-  async getLedgerEnd(): Promise<string> {
-    const result = await this.fetch<{ offset: string }>('/state/ledger-end');
+  async getLedgerEnd(): Promise<number> {
+    console.log('getLedgerEnd: fetching from', this.baseUrl + '/state/ledger-end');
+    const result = await this.fetch<{ offset: number }>('/state/ledger-end');
+    console.log('getLedgerEnd: result =', JSON.stringify(result), 'type of offset:', typeof result.offset);
     return result.offset;
   }
 
   /**
    * Query active contracts by template ID
    * Note: JSON API v2 doesn't support query-by-attribute, so we filter client-side
+   * @param actAs - The party to act as
+   * @param templateId - The template ID to query
+   * @param filter - Optional client-side filter criteria
+   * @param readAs - Optional additional parties to read as (e.g., public party)
    */
   async queryContracts(
     actAs: string,
     templateId: string,
-    filter?: Record<string, unknown>
+    filter?: Record<string, unknown>,
+    readAs?: string[]
   ): Promise<Array<{
     contractId: string;
     templateId: string;
@@ -229,30 +266,46 @@ export class CantonJsonClient {
     // Get current ledger offset
     const offset = await this.getLedgerEnd();
 
-    // Canton JSON API v2 active-contracts query format
-    // templateId should be a string in format "packageId:moduleName:entityName"
-    const queryBody = {
-      filter: {
-        filtersByParty: {
-          [actAs]: {
-            cumulative: [
-              {
-                identifierFilter: {
-                  TemplateFilter: {
-                    value: {
-                      templateId,
-                      includeCreatedEventBlob: false
-                    }
-                  }
+    // Build filtersByParty
+    // If readAs is provided, use ONLY those parties (for public visibility queries)
+    // Otherwise use actAs party (for user-specific queries)
+    const partiesToQuery = readAs && readAs.length > 0 ? readAs : [actAs];
+    const filtersByParty: Record<string, { cumulative: Array<{ identifierFilter: { TemplateFilter: { value: { templateId: string; includeCreatedEventBlob: boolean } } } }> }> = {};
+
+    for (const party of partiesToQuery) {
+      filtersByParty[party] = {
+        cumulative: [
+          {
+            identifierFilter: {
+              TemplateFilter: {
+                value: {
+                  templateId,
+                  includeCreatedEventBlob: false
                 }
               }
-            ]
+            }
           }
-        }
+        ]
+      };
+    }
+
+    // Canton JSON API v2 active-contracts query format
+    const queryBody = {
+      filter: {
+        filtersByParty
       },
       verbose: true,
       activeAtOffset: offset
     };
+
+    console.log('Canton active-contracts query:', JSON.stringify({
+      endpoint: '/state/active-contracts',
+      offset,
+      offsetType: typeof offset,
+      partiesToQuery,
+      templateId,
+      queryBody
+    }));
 
     const result = await this.fetch<Array<{
       workflowId: string;
@@ -276,15 +329,41 @@ export class CantonJsonClient {
       }
     );
 
-    // Transform and filter results
-    let contracts = (result || []).map(c => ({
-      contractId: c.contractEntry.JsActiveContract.createdEvent.contractId,
-      templateId,
-      payload: c.contractEntry.JsActiveContract.createdEvent.createArgument,
-      createdAt: c.contractEntry.JsActiveContract.createdEvent.createdAt,
-      signatories: c.contractEntry.JsActiveContract.createdEvent.signatories,
-      observers: c.contractEntry.JsActiveContract.createdEvent.observers
+    console.log('Canton active-contracts result:', JSON.stringify({
+      resultCount: Array.isArray(result) ? result.length : 'not-array',
+      resultType: typeof result,
+      firstItem: Array.isArray(result) && result.length > 0 ? JSON.stringify(result[0]).slice(0, 500) : 'empty'
     }));
+
+    // Transform and filter results
+    let contracts: Array<{
+      contractId: string;
+      templateId: string;
+      payload: Record<string, unknown>;
+      createdAt?: string;
+      signatories?: string[];
+      observers?: string[];
+    }> = [];
+
+    try {
+      contracts = (result || []).map(c => {
+        if (!c.contractEntry?.JsActiveContract?.createdEvent) {
+          console.error('Unexpected contract structure:', JSON.stringify(c).slice(0, 300));
+          throw new Error('Unexpected contract structure');
+        }
+        return {
+          contractId: c.contractEntry.JsActiveContract.createdEvent.contractId,
+          templateId,
+          payload: c.contractEntry.JsActiveContract.createdEvent.createArgument,
+          createdAt: c.contractEntry.JsActiveContract.createdEvent.createdAt,
+          signatories: c.contractEntry.JsActiveContract.createdEvent.signatories,
+          observers: c.contractEntry.JsActiveContract.createdEvent.observers
+        };
+      });
+    } catch (mapError) {
+      console.error('Error mapping contracts:', mapError);
+      throw mapError;
+    }
 
     // Client-side filtering if filter provided
     if (filter && Object.keys(filter).length > 0) {

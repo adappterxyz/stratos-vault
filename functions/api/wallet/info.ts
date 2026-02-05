@@ -16,6 +16,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     // Get wallet addresses for all chains
     const walletAddresses = await getWalletAddresses(context.env.DB, user.id);
 
+    // Check for config overrides from database
+    let theme = context.env.THEME || 'purple';
+    let orgName = context.env.ORG_NAME || 'Canton Wallet';
+    try {
+      const overrides = await context.env.DB.prepare(
+        `SELECT key, value FROM config_overrides WHERE key IN ('THEME', 'ORG_NAME')`
+      ).all();
+      for (const row of overrides.results as unknown as { key: string; value: string }[]) {
+        if (row.key === 'THEME') theme = row.value;
+        if (row.key === 'ORG_NAME') orgName = row.value;
+      }
+    } catch {
+      // Table might not exist, use env defaults
+    }
+
     return jsonResponse({
       success: true,
       data: {
@@ -25,8 +40,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         applicationId: context.env.CANTON_AUTH_USER,
         onboarded: userStatus.user_onboarded,
         walletInstalled: userStatus.user_wallet_installed,
-        theme: context.env.THEME || 'purple',
-        orgName: context.env.ORG_NAME || 'Canton Wallet',
+        theme,
+        orgName,
         walletAddresses: walletAddresses
       }
     });

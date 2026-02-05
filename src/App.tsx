@@ -12,9 +12,7 @@ import Wallet from './components/Wallet';
 import {
   ShieldCheck,
   Users,
-  Building2,
   KeyRound,
-  Package,
   Globe,
   LayoutGrid,
   Settings,
@@ -176,9 +174,9 @@ interface DbUser {
 
 const API_BASE = window.location.origin;
 
-// Snap-to-grid helper (20px grid)
-const SNAP_GRID = 20;
-const snap = (value: number, grid: number) => Math.round(value / grid) * grid;
+// Snap-to-grid helper
+const SNAP_GRID = 1;
+const snap = (value: number, grid: number) => grid <= 1 ? value : Math.round(value / grid) * grid;
 
 // LocalStorage key for app window state persistence
 const STORAGE_KEY = 'wallet-app-window-state';
@@ -297,38 +295,89 @@ function App() {
     } catch {}
     return null;
   });
-  const appDragRef = useRef<{ appId: string; startX: number; startY: number; startPosX: number; startPosY: number } | null>(null);
-  const appResizeRef = useRef<{ appId: string; startX: number; startY: number; startW: number; startH: number } | null>(null);
+  const appDragRef = useRef<{ appId: string; startX: number; startY: number; startPosX: number; startPosY: number; active: boolean } | null>(null);
+  const appResizeRef = useRef<{ appId: string; startX: number; startY: number; startW: number; startH: number; active: boolean } | null>(null);
+
+  // Direct DOM manipulation during drag/resize for smooth performance.
+  // React state is only updated on pointer-up to commit the final position.
+  // A 4px dead-zone prevents accidental drags on simple clicks.
+  const rafRef = useRef<number>(0);
+  const DRAG_THRESHOLD = 4;
 
   const handleAppPointerMove = useCallback((e: MouseEvent | TouchEvent) => {
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
 
     if (appDragRef.current) {
+      const drag = appDragRef.current;
+      // Activate only after moving past threshold
+      if (!drag.active) {
+        if (Math.abs(clientX - drag.startX) < DRAG_THRESHOLD && Math.abs(clientY - drag.startY) < DRAG_THRESHOLD) return;
+        drag.active = true;
+        document.querySelectorAll('.app-iframe').forEach(f => (f as HTMLElement).style.pointerEvents = 'none');
+        document.body.style.userSelect = 'none';
+      }
       e.preventDefault();
-      const { appId, startX, startY, startPosX, startPosY } = appDragRef.current;
-      setFloatingApps(prev => ({
-        ...prev,
-        [appId]: { ...prev[appId], x: snap(clientX - startX + startPosX, SNAP_GRID), y: snap(clientY - startY + startPosY, SNAP_GRID) },
-      }));
+      const newX = clientX - drag.startX + drag.startPosX;
+      const newY = clientY - drag.startY + drag.startPosY;
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-floating-app="${drag.appId}"]`) as HTMLElement | null;
+        if (el) {
+          el.style.left = `${newX}px`;
+          el.style.top = `${newY}px`;
+        }
+      });
     }
     if (appResizeRef.current) {
+      const resize = appResizeRef.current;
+      if (!resize.active) {
+        if (Math.abs(clientX - resize.startX) < DRAG_THRESHOLD && Math.abs(clientY - resize.startY) < DRAG_THRESHOLD) return;
+        resize.active = true;
+        document.querySelectorAll('.app-iframe').forEach(f => (f as HTMLElement).style.pointerEvents = 'none');
+        document.body.style.userSelect = 'none';
+      }
       e.preventDefault();
-      const { appId, startX, startY, startW, startH } = appResizeRef.current;
-      setFloatingApps(prev => ({
-        ...prev,
-        [appId]: {
-          ...prev[appId],
-          width: snap(Math.max(280, startW + clientX - startX), SNAP_GRID),
-          height: snap(Math.max(300, startH + clientY - startY), SNAP_GRID),
-        },
-      }));
+      const newW = Math.max(280, resize.startW + clientX - resize.startX);
+      const newH = Math.max(300, resize.startH + clientY - resize.startY);
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-floating-app="${resize.appId}"]`) as HTMLElement | null;
+        if (el) {
+          el.style.width = `${newW}px`;
+          el.style.height = `${newH}px`;
+        }
+      });
     }
   }, []);
 
   const handleAppPointerUp = useCallback(() => {
+    // Commit final position from DOM to React state only if drag/resize was activated
+    const drag = appDragRef.current;
+    const resize = appResizeRef.current;
+    if (drag?.active) {
+      const el = document.querySelector(`[data-floating-app="${drag.appId}"]`) as HTMLElement | null;
+      if (el) {
+        setFloatingApps(prev => ({
+          ...prev,
+          [drag.appId]: { ...prev[drag.appId], x: parseFloat(el.style.left) || 0, y: parseFloat(el.style.top) || 0 },
+        }));
+      }
+    }
+    if (resize?.active) {
+      const el = document.querySelector(`[data-floating-app="${resize.appId}"]`) as HTMLElement | null;
+      if (el) {
+        setFloatingApps(prev => ({
+          ...prev,
+          [resize.appId]: { ...prev[resize.appId], width: parseFloat(el.style.width) || 400, height: parseFloat(el.style.height) || 400 },
+        }));
+      }
+    }
     appDragRef.current = null;
     appResizeRef.current = null;
+    // Re-enable iframe pointer events
+    document.querySelectorAll('.app-iframe').forEach(f => (f as HTMLElement).style.pointerEvents = '');
+    document.body.style.userSelect = '';
   }, []);
 
   useEffect(() => {
@@ -362,7 +411,7 @@ function App() {
     if (!state?.floating) return;
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    appDragRef.current = { appId, startX: clientX, startY: clientY, startPosX: state.x, startPosY: state.y };
+    appDragRef.current = { appId, startX: clientX, startY: clientY, startPosX: state.x, startPosY: state.y, active: false };
   };
 
   const startAppResize = (appId: string, e: React.MouseEvent | React.TouchEvent) => {
@@ -371,14 +420,15 @@ function App() {
     if (!state?.floating) return;
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    appResizeRef.current = { appId, startX: clientX, startY: clientY, startW: state.width, startH: state.height };
+    appResizeRef.current = { appId, startX: clientX, startY: clientY, startW: state.width, startH: state.height, active: false };
   };
 
   const toggleAppFloating = (appId: string) => {
     setFloatingApps(prev => {
       const current = prev[appId];
       if (current?.floating) {
-        // Return to fullscreen — remove entry
+        // Return to fullscreen — remove entry and set as active app
+        setActiveApp(appId);
         const { [appId]: _, ...rest } = prev;
         return rest;
       }
@@ -404,23 +454,42 @@ function App() {
     { role: 'assistant', content: 'Hello! I\'m your AI assistant. How can I help you with your wallet today?' }
   ]);
   const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatAgentWebhookUrl, setChatAgentWebhookUrl] = useState<string | null>(null);
+  const [customLogo, setCustomLogo] = useState<string | null>(null);
 
-  const handleSendChat = (e: React.FormEvent) => {
+  const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || chatLoading || !chatAgentWebhookUrl) return;
 
-    // Add user message
-    setChatMessages(prev => [...prev, { role: 'user', content: chatInput }]);
-
-    // Simulate AI response
-    setTimeout(() => {
-      setChatMessages(prev => [...prev, {
-        role: 'assistant',
-        content: 'This is a demo AI assistant. In a real implementation, I would help you with wallet operations, answer questions about your assets, and provide guidance on transactions.'
-      }]);
-    }, 1000);
-
+    const userMessage = chatInput;
     setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setChatLoading(true);
+
+    try {
+      const res = await fetch(chatAgentWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage,
+          sessionId: authUser?.id,
+          name: authUser?.displayName || authUser?.username || 'Web User',
+        }),
+      });
+
+      const json = await res.json() as { reply?: string; sessionId?: string; conversationId?: string };
+
+      if (json.reply) {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: json.reply! }]);
+      } else {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, something went wrong. Please try again.' }]);
+      }
+    } catch {
+      setChatMessages(prev => [...prev, { role: 'assistant', content: 'Unable to reach the assistant. Please try again later.' }]);
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   // Login form
@@ -433,6 +502,9 @@ function App() {
   const [dbUsers, setDbUsers] = useState<DbUser[]>([]);
   const [adminLoading, setAdminLoading] = useState(false);
   const [nodeName, setNodeName] = useState<string | null>(null);
+  const [cantonVersion, setCantonVersion] = useState<string | null>(null);
+  const [showPartiesModal, setShowPartiesModal] = useState(false);
+  const [showPackagesModal, setShowPackagesModal] = useState(false);
   const [partiesLoading, setPartiesLoading] = useState(false);
   const [adminToken] = useState<string | null>(() => localStorage.getItem('adminToken'));
 
@@ -456,8 +528,9 @@ function App() {
     RP_NAME: string;
     THEME: string;
     ORG_NAME: string;
-    DOCK_APPS: string;
-    ALLOWED_IFRAME_ORIGINS: string;
+    CHAT_AGENT_WEBHOOK_URL: string;
+    SPLICE_HOST: string;
+    CANTON_JSON_HOST: string;
   }
   interface RpcEndpointRow {
     id: string;
@@ -491,7 +564,7 @@ function App() {
   const [superadminError, setSuperadminError] = useState('');
   const [adminUsers, setAdminUsers] = useState<AdminUserRow[]>([]);
   const [configData, setConfigData] = useState<ConfigData | null>(null);
-  const [configOverriddenKeys, setConfigOverriddenKeys] = useState<string[]>([]);
+  const [boundServices, setBoundServices] = useState<Record<string, string> | null>(null);
   const [showCreateAdminUser, setShowCreateAdminUser] = useState(false);
   const [newAdminUsername, setNewAdminUsername] = useState('');
   const [newAdminPassword, setNewAdminPassword] = useState('');
@@ -499,7 +572,7 @@ function App() {
   const [newAdminIsSuperadmin, setNewAdminIsSuperadmin] = useState(false);
   const [editingConfig, setEditingConfig] = useState(false);
   const [editConfigData, setEditConfigData] = useState<ConfigData | null>(null);
-  const [superadminSection, setSuperadminSection] = useState<'admin-users' | 'config' | 'users' | 'parties' | 'codes' | 'packages' | 'rpc' | 'apps'>('admin-users');
+  const [superadminSection, setSuperadminSection] = useState<'admin-users' | 'config' | 'users' | 'codes' | 'rpc' | 'apps'>('admin-users');
   const [adminSidebarCollapsed, setAdminSidebarCollapsed] = useState(false);
   const [rpcNetworkMode, setRpcNetworkMode] = useState<'mainnet' | 'testnet'>('mainnet');
   const [rpcEndpoints, setRpcEndpoints] = useState<RpcEndpointRow[]>([]);
@@ -513,6 +586,15 @@ function App() {
   const [showAddApp, setShowAddApp] = useState(false);
   const [editingApp, setEditingApp] = useState<AppRow | null>(null);
   const [newApp, setNewApp] = useState({ id: '', name: '', icon: '', color: '#6366f1', url: '', sort_order: 0, is_enabled: true });
+  const [emojiPickerTarget, setEmojiPickerTarget] = useState<'new' | 'edit' | null>(null);
+
+  // App access control state
+  interface AppAccessUser { user_id: string; username: string; display_name: string | null }
+  const [appAccessMap, setAppAccessMap] = useState<Record<string, string[]>>({});
+  const [appAccessUsers, setAppAccessUsers] = useState<Record<string, AppAccessUser[]>>({});
+  const [appAccessModalApp, setAppAccessModalApp] = useState<AppRow | null>(null);
+  const [appAccessSearch, setAppAccessSearch] = useState('');
+  const [userAppAccessModalUser, setUserAppAccessModalUser] = useState<DbUser | null>(null);
 
   // Registration codes state
   const [registrationCodes, setRegistrationCodes] = useState<{
@@ -579,52 +661,67 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Fetch theme, org name, dock apps on mount (before authentication)
-  useEffect(() => {
-    const fetchConfig = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/api/config`);
-        const data = await res.json() as ApiResponse<{
-          theme: string;
-          orgName: string;
-          dockApps: Array<{ id: string; name: string; icon: string; color: string; url: string | null }>;
-          allowedIframeOrigins: string[];
-          rpcEndpoints?: {
-            evm?: Record<string, string>;
-            btc?: Record<string, string>;
-            svm?: Record<string, string>;
-            tron?: Record<string, string>;
-            ton?: Record<string, string>;
-          };
-        }>;
-        if (data.success && data.data) {
-          if (data.data.theme) setTheme(data.data.theme);
-          if (data.data.orgName) {
-            setOrgName(data.data.orgName);
-            document.title = data.data.orgName;
-          }
-          if (data.data.dockApps && data.data.dockApps.length > 0) {
-            setDockApps(data.data.dockApps);
-          }
-          if (data.data.allowedIframeOrigins) {
-            setAllowedIframeOrigins(data.data.allowedIframeOrigins);
-          }
-          // Configure RPC endpoints for signers
-          if (data.data.rpcEndpoints) {
-            const rpc = data.data.rpcEndpoints;
-            if (rpc.evm) evmSigner.setEvmRpcEndpoints(rpc.evm);
-            if (rpc.btc) btcSigner.setBtcRpcEndpoints(rpc.btc);
-            if (rpc.svm) solSigner.setSolRpcEndpoints(rpc.svm);
-            if (rpc.tron) tronSigner.setTronRpcEndpoints(rpc.tron);
-            if (rpc.ton) tonSigner.setTonRpcEndpoints(rpc.ton);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch config:', error);
+  // Fetch theme, org name, dock apps (with optional auth for per-user app filtering)
+  const fetchConfig = async (token?: string | null) => {
+    try {
+      const headers: Record<string, string> = {};
+      const authToken = token ?? sessionId;
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
       }
-    };
+      const res = await fetch(`${API_BASE}/api/config`, { headers });
+      const data = await res.json() as ApiResponse<{
+        theme: string;
+        orgName: string;
+        dockApps: Array<{ id: string; name: string; icon: string; color: string; url: string | null }>;
+        allowedIframeOrigins: string[];
+        rpcEndpoints?: {
+          evm?: Record<string, string>;
+          btc?: Record<string, string>;
+          svm?: Record<string, string>;
+          tron?: Record<string, string>;
+          ton?: Record<string, string>;
+        };
+        chatAgentWebhookUrl?: string | null;
+        logo?: string | null;
+      }>;
+      if (data.success && data.data) {
+        if (data.data.theme) setTheme(data.data.theme);
+        if (data.data.orgName) {
+          setOrgName(data.data.orgName);
+          document.title = data.data.orgName;
+        }
+        if (data.data.dockApps) {
+          setDockApps(data.data.dockApps);
+        }
+        if (data.data.allowedIframeOrigins) {
+          setAllowedIframeOrigins(data.data.allowedIframeOrigins);
+        }
+        // Configure RPC endpoints for signers
+        if (data.data.rpcEndpoints) {
+          const rpc = data.data.rpcEndpoints;
+          if (rpc.evm) evmSigner.setEvmRpcEndpoints(rpc.evm);
+          if (rpc.btc) btcSigner.setBtcRpcEndpoints(rpc.btc);
+          if (rpc.svm) solSigner.setSolRpcEndpoints(rpc.svm);
+          if (rpc.tron) tronSigner.setTronRpcEndpoints(rpc.tron);
+          if (rpc.ton) tonSigner.setTonRpcEndpoints(rpc.ton);
+        }
+        if (data.data.chatAgentWebhookUrl) {
+          setChatAgentWebhookUrl(data.data.chatAgentWebhookUrl);
+        }
+        if (data.data.logo) {
+          setCustomLogo(data.data.logo);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch config:', error);
+    }
+  };
+
+  // Fetch config on mount and re-fetch when session changes (for per-user app filtering)
+  useEffect(() => {
     fetchConfig();
-  }, []);
+  }, [sessionId]);
 
   // Check session on mount
   useEffect(() => {
@@ -2493,7 +2590,7 @@ function App() {
           ...getAdminHeaders()
         },
         body: JSON.stringify({
-          maxUses: parseInt(newCodeMaxUses) || 10,
+          maxUses: newCodeType === 'reserved_username' ? 1 : (parseInt(newCodeMaxUses) || 10),
           expiresAt: newCodeExpiry || undefined,
           codeType: newCodeType,
           reservedUsername: newCodeType === 'reserved_username' ? newCodeReservedUsername : undefined
@@ -2819,10 +2916,15 @@ function App() {
       const res = await fetch(`${API_BASE}/api/superadmin/config`, {
         headers: { 'X-Superadmin-Token': superadminToken }
       });
-      const data = await res.json() as ApiResponse<{ config: ConfigData; overriddenKeys: string[] }>;
+      const data = await res.json() as ApiResponse<{ config: ConfigData; cantonVersion?: string; boundServices?: Record<string, string> }>;
       if (data.success && data.data) {
         setConfigData(data.data.config);
-        setConfigOverriddenKeys(data.data.overriddenKeys);
+        if (data.data.cantonVersion) {
+          setCantonVersion(data.data.cantonVersion);
+        }
+        if (data.data.boundServices) {
+          setBoundServices(data.data.boundServices);
+        }
       }
     } catch (error) {
       console.error('Failed to fetch config:', error);
@@ -3146,6 +3248,67 @@ function App() {
     }
   };
 
+  // App access control functions
+  const fetchAppAccess = async () => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/app-access`, {
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse<Array<{ user_id: string; app_id: string; username: string; display_name: string | null }>>;
+      if (data.success && data.data) {
+        const map: Record<string, string[]> = {};
+        const users: Record<string, AppAccessUser[]> = {};
+        data.data.forEach((row) => {
+          if (!map[row.app_id]) map[row.app_id] = [];
+          map[row.app_id].push(row.user_id);
+          if (!users[row.app_id]) users[row.app_id] = [];
+          users[row.app_id].push({ user_id: row.user_id, username: row.username, display_name: row.display_name });
+        });
+        setAppAccessMap(map);
+        setAppAccessUsers(users);
+      }
+    } catch (error) {
+      console.error('Failed to fetch app access:', error);
+    }
+  };
+
+  const handleGrantAppAccess = async (userId: string, appId: string) => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/app-access`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Superadmin-Token': superadminToken
+        },
+        body: JSON.stringify({ user_id: userId, app_id: appId })
+      });
+      const data = await res.json() as ApiResponse;
+      if (data.success) {
+        fetchAppAccess();
+      }
+    } catch (error) {
+      console.error('Failed to grant app access:', error);
+    }
+  };
+
+  const handleRevokeAppAccess = async (userId: string, appId: string) => {
+    if (!superadminToken) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/superadmin/app-access?user_id=${userId}&app_id=${appId}`, {
+        method: 'DELETE',
+        headers: { 'X-Superadmin-Token': superadminToken }
+      });
+      const data = await res.json() as ApiResponse;
+      if (data.success) {
+        fetchAppAccess();
+      }
+    } catch (error) {
+      console.error('Failed to revoke app access:', error);
+    }
+  };
+
   const handleSuperadminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setSuperadminLoading(true);
@@ -3288,11 +3451,10 @@ function App() {
         },
         body: JSON.stringify(editConfigData)
       });
-      const data = await res.json() as ApiResponse<{ config: ConfigData; overriddenKeys: string[] }>;
+      const data = await res.json() as ApiResponse<{ config: ConfigData }>;
 
       if (data.success && data.data) {
         setConfigData(data.data.config);
-        setConfigOverriddenKeys(data.data.overriddenKeys);
         setEditingConfig(false);
         setEditConfigData(null);
         // Refresh the page config
@@ -3328,14 +3490,8 @@ function App() {
       case 'users':
         fetchDbUsers();
         break;
-      case 'parties':
-        fetchCantonUsers();
-        break;
       case 'codes':
         fetchRegistrationCodes();
-        break;
-      case 'packages':
-        fetchPackages();
         break;
       case 'rpc':
         fetchRpcEndpoints();
@@ -3343,9 +3499,46 @@ function App() {
         break;
       case 'apps':
         fetchApps();
+        fetchAppAccess();
+        if (dbUsers.length === 0) fetchDbUsers();
         break;
     }
   }, [superadminSection, superadminToken, currentView]);
+
+  // Emoji picker grid
+  const EMOJI_OPTIONS = [
+    '🚀', '💰', '🏦', '💎', '🔗', '⚡', '🌐', '📊',
+    '💱', '🔒', '🛡️', '📈', '📉', '💸', '🪙', '🏧',
+    '🔄', '⇄', '🖼', '📋', '⚙️', '🔧', '🛒', '🎮',
+    '📱', '💬', '📁', '📂', '🗂️', '🔍', '📝', '✅',
+    '❤️', '⭐', '🔥', '🎯', '🎨', '🌟', '💡', '🔔',
+    '🏠', '👤', '👥', '🔑', '📡', '🧩', '📦', '🗄️',
+  ];
+
+  const renderEmojiPicker = (target: 'new' | 'edit') => {
+    if (emojiPickerTarget !== target) return null;
+    return (
+      <div className="emoji-picker-grid" onClick={(e) => e.stopPropagation()}>
+        {EMOJI_OPTIONS.map((emoji) => (
+          <button
+            key={emoji}
+            type="button"
+            className="emoji-picker-item"
+            onClick={() => {
+              if (target === 'new') {
+                setNewApp({...newApp, icon: emoji});
+              } else if (editingApp) {
+                setEditingApp({...editingApp, icon: emoji});
+              }
+              setEmojiPickerTarget(null);
+            }}
+          >
+            {emoji}
+          </button>
+        ))}
+      </div>
+    );
+  };
 
   // Admin view - requires username/password login
   if (currentView === 'admin') {
@@ -3355,15 +3548,18 @@ function App() {
         <div className={`app theme-${theme}`}>
           <div className="login-container">
             <div className="login-card">
+              <div className="login-logo">
+                <img src={customLogo || '/logo.png'} alt={orgName} />
+              </div>
               <h1>Admin</h1>
-              <p className="login-subtitle">System administration login</p>
+              <p className="login-subtitle">System administration</p>
 
               {superadminError && (
                 <div className="login-error">{superadminError}</div>
               )}
 
               <form onSubmit={handleSuperadminLogin}>
-                <div className="form-group">
+                <div className="login-field">
                   <label>Username</label>
                   <input
                     type="text"
@@ -3373,7 +3569,7 @@ function App() {
                     required
                   />
                 </div>
-                <div className="form-group">
+                <div className="login-field">
                   <label>Password</label>
                   <input
                     type="password"
@@ -3384,16 +3580,12 @@ function App() {
                   />
                 </div>
 
-                <button type="submit" className="send-btn admin-btn" disabled={superadminLoading}>
-                  {superadminLoading ? 'Please wait...' : 'Login'}
+                <button type="submit" className="login-btn-primary" disabled={superadminLoading} style={{ marginTop: '0.5rem' }}>
+                  {superadminLoading ? 'Authenticating...' : 'Login'}
                 </button>
               </form>
 
-              <div className="login-divider">
-                <span>or</span>
-              </div>
-
-              <button onClick={() => navigateTo('wallet')} className="btn-secondary">
+              <button onClick={() => navigateTo('wallet')} className="login-btn-ghost">
                 Back to Wallet
               </button>
             </div>
@@ -3439,30 +3631,12 @@ function App() {
               </button>
 
               <button
-                className={`sidebar-nav-item ${superadminSection === 'parties' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('parties')}
-              >
-                <Building2 size={18} className="nav-icon" />
-                <span className="nav-label">Canton Parties</span>
-                {cantonUsers.length > 0 && <span className="nav-badge">{cantonUsers.length}</span>}
-              </button>
-
-              <button
                 className={`sidebar-nav-item ${superadminSection === 'codes' ? 'active' : ''}`}
                 onClick={() => setSuperadminSection('codes')}
               >
                 <KeyRound size={18} className="nav-icon" />
                 <span className="nav-label">Registration Codes</span>
                 {registrationCodes.length > 0 && <span className="nav-badge">{registrationCodes.length}</span>}
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'packages' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('packages')}
-              >
-                <Package size={18} className="nav-icon" />
-                <span className="nav-label">Daml Packages</span>
-                {packageIds.length > 0 && <span className="nav-badge">{packageIds.length}</span>}
               </button>
 
               <button
@@ -3478,7 +3652,7 @@ function App() {
                 onClick={() => setSuperadminSection('apps')}
               >
                 <LayoutGrid size={18} className="nav-icon" />
-                <span className="nav-label">Dock Apps</span>
+                <span className="nav-label">Apps</span>
               </button>
 
               <button
@@ -3487,7 +3661,6 @@ function App() {
               >
                 <Settings size={18} className="nav-icon" />
                 <span className="nav-label">Configuration</span>
-                {configOverriddenKeys.length > 0 && <span className="nav-badge override">{configOverriddenKeys.length}</span>}
               </button>
             </nav>
 
@@ -3503,7 +3676,7 @@ function App() {
           {/* Main Content */}
           <main className="superadmin-main">
             {superadminError && (
-              <div className="transfer-status error" style={{ marginBottom: '1rem' }}>
+              <div className={`transfer-status ${superadminError.includes('copied') || superadminError.includes('success') || superadminError.includes('Success') ? 'success' : 'error'}`} style={{ marginBottom: '1rem' }}>
                 {superadminError}
               </div>
             )}
@@ -3557,15 +3730,17 @@ function App() {
                           )}
                         </span>
                         <span className="admin-cell">{new Date(user.createdAt).toLocaleDateString()}</span>
-                        <span className="admin-cell admin-actions">
-                          {superadminUser.isSuperadmin && user.id !== superadminUser.id && (
-                            <button
-                              onClick={() => handleDeleteAdminUser(user.id)}
-                              className="delete-btn"
-                            >
-                              Delete
-                            </button>
-                          )}
+                        <span className="admin-cell">
+                          <div className="action-buttons">
+                            {superadminUser.isSuperadmin && user.id !== superadminUser.id && (
+                              <button
+                                onClick={() => handleDeleteAdminUser(user.id)}
+                                className="btn-delete"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
                         </span>
                       </div>
                     ))
@@ -3582,14 +3757,24 @@ function App() {
                     Configuration
                     
                   </h2>
-                  {superadminUser.isSuperadmin && configData && !editingConfig && (
-                    <button
-                      onClick={() => { setEditConfigData({...configData}); setEditingConfig(true); }}
-                      className="send-btn admin-btn"
-                    >
-                      Edit Config
-                    </button>
-                  )}
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    {superadminUser.isSuperadmin && (
+                      <button
+                        onClick={() => { fetchPackages(); setShowPackagesModal(true); }}
+                        className="send-btn admin-btn"
+                      >
+                        Daml Packages
+                      </button>
+                    )}
+                    {superadminUser.isSuperadmin && configData && !editingConfig && (
+                      <button
+                        onClick={() => { setEditConfigData({...configData}); setEditingConfig(true); }}
+                        className="send-btn admin-btn"
+                      >
+                        Edit Config
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {configData && (
@@ -3598,6 +3783,7 @@ function App() {
                   <div className="config-edit-form">
                     <div className="form-group">
                       <label>Organization Name (ORG_NAME)</label>
+                      <span className="field-descriptor">Display name shown in the app header and browser title</span>
                       <input
                         type="text"
                         value={editConfigData.ORG_NAME}
@@ -3606,6 +3792,7 @@ function App() {
                     </div>
                     <div className="form-group">
                       <label>Relying Party Name (RP_NAME)</label>
+                      <span className="field-descriptor">Name shown in browser passkey prompts during registration and login</span>
                       <input
                         type="text"
                         value={editConfigData.RP_NAME}
@@ -3614,33 +3801,47 @@ function App() {
                     </div>
                     <div className="form-group">
                       <label>Theme</label>
+                      <span className="field-descriptor">Color scheme applied across the entire wallet UI</span>
                       <select
                         value={editConfigData.THEME}
                         onChange={(e) => setEditConfigData({...editConfigData, THEME: e.target.value})}
                         className="role-select"
                       >
                         <option value="purple">Purple</option>
+                        <option value="teal">Teal</option>
                         <option value="blue">Blue</option>
                         <option value="green">Green</option>
-                        <option value="dark">Dark</option>
+                        <option value="orange">Orange</option>
+                        <option value="rose">Rose</option>
+                        <option value="slate">Slate</option>
                         <option value="light">Light</option>
                       </select>
                     </div>
                     <div className="form-group">
-                      <label>Dock Apps (JSON)</label>
-                      <textarea
-                        value={editConfigData.DOCK_APPS}
-                        onChange={(e) => setEditConfigData({...editConfigData, DOCK_APPS: e.target.value})}
-                        rows={6}
-                        style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
+                      <label>Splice Host (SPLICE_HOST)</label>
+                      <span className="field-descriptor">Canton validator node hostname for ledger API operations</span>
+                      <input
+                        type="text"
+                        value={editConfigData.SPLICE_HOST}
+                        onChange={(e) => setEditConfigData({...editConfigData, SPLICE_HOST: e.target.value})}
                       />
                     </div>
                     <div className="form-group">
-                      <label>Allowed Iframe Origins (comma-separated)</label>
-                      <textarea
-                        value={editConfigData.ALLOWED_IFRAME_ORIGINS}
-                        onChange={(e) => setEditConfigData({...editConfigData, ALLOWED_IFRAME_ORIGINS: e.target.value})}
-                        rows={3}
+                      <label>Canton JSON Host (CANTON_JSON_HOST)</label>
+                      <span className="field-descriptor">Canton JSON API hostname for party and user management</span>
+                      <input
+                        type="text"
+                        value={editConfigData.CANTON_JSON_HOST}
+                        onChange={(e) => setEditConfigData({...editConfigData, CANTON_JSON_HOST: e.target.value})}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Chat Agent Webhook URL</label>
+                      <span className="field-descriptor">AI assistant webhook endpoint for the chat panel</span>
+                      <input
+                        type="text"
+                        value={editConfigData.CHAT_AGENT_WEBHOOK_URL}
+                        onChange={(e) => setEditConfigData({...editConfigData, CHAT_AGENT_WEBHOOK_URL: e.target.value})}
                       />
                     </div>
                     <div className="modal-buttons" style={{ marginTop: '1rem' }}>
@@ -3657,35 +3858,128 @@ function App() {
                   </div>
                 ) : (
                   <div className="config-display">
+                    {cantonVersion && (
+                      <div className="config-item">
+                        <strong>Canton Version:</strong>
+                        <span>{cantonVersion}</span>
+                      </div>
+                    )}
                     <div className="config-item">
                       <strong>Organization Name:</strong>
                       <span>{configData.ORG_NAME}</span>
-                      {configOverriddenKeys.includes('ORG_NAME') && <span className="override-badge">overridden</span>}
+                                            <span className="field-descriptor">Display name shown in the app header and browser title</span>
                     </div>
                     <div className="config-item">
                       <strong>RP Name:</strong>
                       <span>{configData.RP_NAME}</span>
-                      {configOverriddenKeys.includes('RP_NAME') && <span className="override-badge">overridden</span>}
+                                            <span className="field-descriptor">Name shown in browser passkey prompts during registration and login</span>
                     </div>
                     <div className="config-item">
                       <strong>Theme:</strong>
                       <span>{configData.THEME}</span>
-                      {configOverriddenKeys.includes('THEME') && <span className="override-badge">overridden</span>}
+                                            <span className="field-descriptor">Color scheme applied across the entire wallet UI</span>
                     </div>
                     <div className="config-item">
-                      <strong>Dock Apps:</strong>
-                      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: '0.85rem', background: 'var(--card-bg)', padding: '0.5rem', borderRadius: '4px', marginTop: '0.5rem' }}>
-                        {configData.DOCK_APPS}
-                      </pre>
-                      {configOverriddenKeys.includes('DOCK_APPS') && <span className="override-badge">overridden</span>}
+                      <strong>Splice Host:</strong>
+                      <span>{configData.SPLICE_HOST}</span>
+                                            <span className="field-descriptor">Canton validator node hostname for ledger API operations</span>
                     </div>
                     <div className="config-item">
-                      <strong>Allowed Iframe Origins:</strong>
-                      <span style={{ wordBreak: 'break-all' }}>{configData.ALLOWED_IFRAME_ORIGINS}</span>
-                      {configOverriddenKeys.includes('ALLOWED_IFRAME_ORIGINS') && <span className="override-badge">overridden</span>}
+                      <strong>Canton JSON Host:</strong>
+                      <span>{configData.CANTON_JSON_HOST}</span>
+                                            <span className="field-descriptor">Canton JSON API hostname for party and user management</span>
+                    </div>
+                    <div className="config-item">
+                      <strong>Chat Agent Webhook URL:</strong>
+                      <span style={{ wordBreak: 'break-all' }}>{configData.CHAT_AGENT_WEBHOOK_URL || 'Not configured'}</span>
+                                            <span className="field-descriptor">AI assistant webhook endpoint for the chat panel</span>
                     </div>
                   </div>
                 )}
+
+                {/* Logo Management - always visible */}
+                <div className="config-display">
+                  <div className="config-item" style={{ marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.75rem' }}>
+                    <strong style={{ opacity: 0.5, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Logo</strong>
+                  </div>
+                  <div className="config-item" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <img src={customLogo || '/logo.png'} alt="Logo" style={{ width: 40, height: 40, borderRadius: 8, background: 'rgba(0,0,0,0.2)' }} />
+                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                      <label className="send-btn admin-btn" style={{ cursor: 'pointer', margin: 0 }}>
+                        Upload
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                          style={{ display: 'none' }}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            if (file.size > 256 * 1024) {
+                              alert('Logo must be under 256KB');
+                              return;
+                            }
+                            const reader = new FileReader();
+                            reader.onload = async () => {
+                              const dataUrl = reader.result as string;
+                              try {
+                                const res = await fetch(`${API_BASE}/api/superadmin/logo`, {
+                                  method: 'PUT',
+                                  headers: { 'Content-Type': 'application/json', 'X-Superadmin-Token': superadminToken! },
+                                  body: JSON.stringify({ logo: dataUrl })
+                                });
+                                const data = await res.json() as { success: boolean };
+                                if (data.success) {
+                                  setCustomLogo(dataUrl);
+                                }
+                              } catch (err) {
+                                console.error('Logo upload failed:', err);
+                              }
+                            };
+                            reader.readAsDataURL(file);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                      {customLogo && (
+                        <button
+                          className="refresh-btn"
+                          style={{ padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(`${API_BASE}/api/superadmin/logo`, {
+                                method: 'DELETE',
+                                headers: { 'X-Superadmin-Token': superadminToken! }
+                              });
+                              const data = await res.json() as { success: boolean };
+                              if (data.success) {
+                                setCustomLogo(null);
+                              }
+                            } catch (err) {
+                              console.error('Logo reset failed:', err);
+                            }
+                          }}
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                    <span className="field-descriptor" style={{ marginLeft: 'auto' }}>PNG, JPG, SVG or WebP, max 256KB</span>
+                  </div>
+
+                  {boundServices && Object.keys(boundServices).length > 0 && (
+                    <>
+                      <div className="config-item" style={{ marginTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.75rem' }}>
+                        <strong style={{ opacity: 0.5, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Bound Services</strong>
+                      </div>
+                      {Object.entries(boundServices).map(([key, value]) => (
+                        <div className="config-item" key={key}>
+                          <strong>{key}:</strong>
+                          <span style={{ fontFamily: 'monospace', fontSize: '0.8rem', opacity: 0.7 }}>{value}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
                   </div>
                 )}
               </section>
@@ -3700,16 +3994,24 @@ function App() {
                     {nodeName && <span className="node-badge">Node: {nodeName}</span>}
                     {dbUsers.length > 0 && <span className="count-badge">{dbUsers.length}</span>}
                   </h2>
-                  <button
-                    onClick={() => fetchDbUsers()}
-                    className="refresh-btn"
-                    disabled={adminLoading}
-                  >
-                    {adminLoading ? 'Loading...' : 'Refresh'}
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      onClick={() => { fetchCantonUsers(); setShowPartiesModal(true); }}
+                      className="send-btn admin-btn"
+                    >
+                      Canton Parties
+                    </button>
+                    <button
+                      onClick={() => fetchDbUsers()}
+                      className="refresh-btn"
+                      disabled={adminLoading}
+                    >
+                      {adminLoading ? 'Loading...' : 'Refresh'}
+                    </button>
+                  </div>
                 </div>
 
-                <div className="admin-users-table">
+                <div className="admin-users-table user-mgmt-table">
                 <div className="admin-table-header">
                   <span>Username</span>
                   <span>Display Name</span>
@@ -3726,20 +4028,33 @@ function App() {
                       <span className="admin-cell party-id-cell" title={user.party_id || ''}>
                         {user.party_id || 'Not linked'}
                       </span>
-                      <span className="admin-cell admin-actions">
-                        <button
-                          onClick={() => handleAdminTapFaucet(user.username)}
-                          className="faucet-btn"
-                          title="Add 100 CC to this user"
-                        >
-                          Faucet
-                        </button>
-                        <button
-                          onClick={() => handleDeleteUser(user.id)}
-                          className="delete-btn"
-                        >
-                          Delete
-                        </button>
+                      <span className="admin-cell">
+                        <div className="action-buttons">
+                          <button
+                            onClick={() => handleAdminTapFaucet(user.username)}
+                            className="btn-edit"
+                            title="Add 100 CC to this user"
+                          >
+                            Faucet
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (appsList.length === 0) await fetchApps();
+                              if (Object.keys(appAccessMap).length === 0) await fetchAppAccess();
+                              setUserAppAccessModalUser(user);
+                            }}
+                            className="btn-edit"
+                            title="Manage app access"
+                          >
+                            Apps
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(user.id)}
+                            className="btn-delete"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </span>
                     </div>
                   ))
@@ -3748,42 +4063,97 @@ function App() {
               </section>
             )}
 
-            {/* Canton Parties Section */}
-            {superadminSection === 'parties' && (
-              <section className="admin-card">
-                <div className="admin-card-header">
-                  <h2>
-                    Canton Parties
-                    {cantonUsers.length > 0 && <span className="count-badge">{cantonUsers.length}</span>}
-                  </h2>
-                  <button
-                    onClick={() => setShowCreateUser(true)}
-                    className="send-btn admin-btn"
-                  >
-                    + New Party
-                  </button>
+            {/* User App Access Modal */}
+            {userAppAccessModalUser && (
+              <div className="modal-overlay" onClick={() => setUserAppAccessModalUser(null)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
+                  <h2>App Access: {userAppAccessModalUser.display_name || userAppAccessModalUser.username}</h2>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    Toggle which apps this user can access. Apps with no users assigned are visible to everyone.
+                  </p>
+                  <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                    {appsList.length === 0 ? (
+                      <div className="no-transactions">No apps configured.</div>
+                    ) : (
+                      appsList.map((app) => {
+                        const hasAccess = appAccessMap[app.id]?.includes(userAppAccessModalUser.id) || false;
+                        const isRestricted = (appAccessMap[app.id]?.length || 0) > 0;
+                        return (
+                          <div key={app.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem 0', borderBottom: '1px solid var(--border-color)' }}>
+                            <label className="toggle-switch">
+                              <input
+                                type="checkbox"
+                                checked={hasAccess}
+                                onChange={() => {
+                                  if (hasAccess) {
+                                    handleRevokeAppAccess(userAppAccessModalUser.id, app.id);
+                                  } else {
+                                    handleGrantAppAccess(userAppAccessModalUser.id, app.id);
+                                  }
+                                }}
+                              />
+                              <span className="toggle-slider"></span>
+                            </label>
+                            <span
+                              className="app-icon-preview"
+                              style={{ backgroundColor: app.color, width: '28px', height: '28px', fontSize: '14px' }}
+                            >
+                              {app.icon}
+                            </span>
+                            <div>
+                              <strong>{app.name}</strong>
+                              {!isRestricted && !hasAccess && (
+                                <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem', fontSize: '0.8rem' }}>(open)</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div className="modal-buttons" style={{ marginTop: '1rem' }}>
+                    <button onClick={() => setUserAppAccessModalUser(null)} className="refresh-btn">
+                      Close
+                    </button>
+                  </div>
                 </div>
+              </div>
+            )}
 
-                <div className="admin-parties-list">
-                  {partiesLoading ? (
-                    <div className="no-transactions">Loading parties...</div>
-                  ) : cantonUsers.length === 0 ? (
-                    <div className="no-transactions">No parties found</div>
-                  ) : (
-                    cantonUsers.map((user) => (
-                      <div key={user.username} className="admin-party-item">
-                      <div className="party-info">
-                        <strong>{user.displayName || user.username}</strong>
-                        <span className="party-username">@{user.username}</span>
-                      </div>
-                      {user.partyId && (
-                        <div className="party-id-display">{user.partyId}</div>
+            {/* Canton Parties Modal */}
+            {showPartiesModal && (
+              <div className="modal-overlay" onClick={() => setShowPartiesModal(false)}>
+                <div className="settings-window" style={{ maxWidth: '600px' }} onClick={(e) => e.stopPropagation()}>
+                  <div className="app-window-header">
+                    <div className="app-window-title">Canton Parties {cantonUsers.length > 0 && <span className="count-badge">{cantonUsers.length}</span>}</div>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <button onClick={() => setShowCreateUser(true)} className="send-btn admin-btn" style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}>+ New Party</button>
+                      <button className="app-window-close" onClick={() => setShowPartiesModal(false)}>✕</button>
+                    </div>
+                  </div>
+                  <div className="app-window-content">
+                    <div className="admin-parties-list">
+                      {partiesLoading ? (
+                        <div className="no-transactions">Loading parties...</div>
+                      ) : cantonUsers.length === 0 ? (
+                        <div className="no-transactions">No parties found</div>
+                      ) : (
+                        cantonUsers.map((user) => (
+                          <div key={user.username} className="admin-party-item">
+                            <div className="party-info">
+                              <strong>{user.displayName || user.username}</strong>
+                              <span className="party-username">@{user.username}</span>
+                            </div>
+                            {user.partyId && (
+                              <div className="party-id-display">{user.partyId}</div>
+                            )}
+                          </div>
+                        ))
                       )}
-                      </div>
-                    ))
-                  )}
+                    </div>
+                  </div>
                 </div>
-              </section>
+              </div>
             )}
 
             {/* Registration Codes Section */}
@@ -3845,20 +4215,22 @@ function App() {
                             <span style={{ color: '#28a745' }}>Active</span>
                           )}
                         </span>
-                        <span className="admin-cell admin-actions">
-                          <button
-                            onClick={() => copyCodeUrl(code.code)}
-                            className="faucet-btn"
-                            title="Copy registration URL"
-                          >
-                            Copy URL
-                          </button>
-                          <button
-                            onClick={() => handleDeleteCode(code.id)}
-                            className="delete-btn"
-                          >
-                            Delete
-                          </button>
+                        <span className="admin-cell">
+                          <div className="action-buttons">
+                            <button
+                              onClick={() => copyCodeUrl(code.code)}
+                              className="btn-edit"
+                              title="Copy registration URL"
+                            >
+                              Copy URL
+                            </button>
+                            <button
+                              onClick={() => handleDeleteCode(code.id)}
+                              className="btn-delete"
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </span>
                       </div>
                     ))}
@@ -3868,112 +4240,114 @@ function App() {
               </section>
             )}
 
-            {/* DAR Upload Section */}
-            {superadminSection === 'packages' && (
-              <section className="admin-card">
-                <div className="admin-card-header">
-                  <h2>
-                    Daml Packages
-                    {packageIds.length > 0 && <span className="count-badge">{packageIds.length}</span>}
-                  </h2>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      onClick={() => setShowInstallFromUrl(true)}
-                      className="send-btn admin-btn"
-                      disabled={darUploading}
-                    >
-                      Install from URL
-                    </button>
-                    <label
-                      className="send-btn admin-btn"
-                      style={{ cursor: darUploading ? 'not-allowed' : 'pointer' }}
-                    >
-                      {darUploading ? 'Uploading...' : '+ Upload DAR'}
-                      <input
-                        type="file"
-                        accept=".dar"
-                        onChange={handleDarUpload}
+            {/* Daml Packages Modal */}
+            {showPackagesModal && (
+              <div className="modal-overlay" onClick={() => setShowPackagesModal(false)}>
+                <div className="settings-window" style={{ maxWidth: '600px' }} onClick={(e) => e.stopPropagation()}>
+                  <div className="app-window-header">
+                    <div className="app-window-title">Daml Packages {packageIds.length > 0 && <span className="count-badge">{packageIds.length}</span>}</div>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <button
+                        onClick={() => setShowInstallFromUrl(true)}
+                        className="send-btn admin-btn"
                         disabled={darUploading}
-                        style={{ display: 'none' }}
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                {/* Install from URL form */}
-                {showInstallFromUrl && (
-                  <div className="modal-backdrop" onClick={() => setShowInstallFromUrl(false)}>
-                    <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-                      <h3>Install DAR from URL</h3>
-                      <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                        Enter the base URL of the app. The DAR will be fetched from <code>/api/package</code>.
-                      </p>
-                      <div className="form-group">
-                        <label>App URL</label>
+                        style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}
+                      >
+                        Install from URL
+                      </button>
+                      <label
+                        className="send-btn admin-btn"
+                        style={{ cursor: darUploading ? 'not-allowed' : 'pointer', fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}
+                      >
+                        {darUploading ? 'Uploading...' : '+ Upload DAR'}
                         <input
-                          type="url"
-                          value={darInstallUrl}
-                          onChange={(e) => setDarInstallUrl(e.target.value)}
-                          placeholder="https://example.com"
+                          type="file"
+                          accept=".dar"
+                          onChange={handleDarUpload}
                           disabled={darUploading}
+                          style={{ display: 'none' }}
                         />
-                      </div>
-                      <div className="modal-actions">
-                        <button
-                          onClick={() => {
-                            setShowInstallFromUrl(false);
-                            setDarInstallUrl('');
-                          }}
-                          className="cancel-btn"
-                          disabled={darUploading}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={handleDarInstallFromUrl}
-                          className="send-btn admin-btn"
-                          disabled={darUploading || !darInstallUrl.trim()}
-                        >
-                          {darUploading ? 'Installing...' : 'Install'}
-                        </button>
-                      </div>
+                      </label>
+                      <button className="app-window-close" onClick={() => setShowPackagesModal(false)}>✕</button>
                     </div>
                   </div>
-                )}
-
-                {darUploadStatus && (
-                  <div className={`transfer-status ${darUploadStatus.includes('Error') ? 'error' : 'success'}`} style={{ marginBottom: '1rem' }}>
-                    {darUploadStatus}
-                  </div>
-                )}
-
-                <div className="admin-packages-list">
-                  {packagesLoading ? (
-                    <div className="no-transactions">Loading packages...</div>
-                  ) : packageIds.length === 0 ? (
-                    <div className="no-transactions">No packages found</div>
-                  ) : (
-                  <div className="packages-grid">
-                    {packageIds.map((pkgId) => (
-                      <div key={pkgId} className="package-item">
-                        <code title={pkgId}>{pkgId.substring(0, 24)}...</code>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(pkgId);
-                            setDarUploadStatus('Package ID copied!');
-                            setTimeout(() => setDarUploadStatus(''), 2000);
-                          }}
-                          className="copy-btn"
-                          title="Copy package ID"
-                        >
-                          Copy
-                        </button>
+                  <div className="app-window-content">
+                    {/* Install from URL form */}
+                    {showInstallFromUrl && (
+                      <div className="modal-backdrop" onClick={() => setShowInstallFromUrl(false)}>
+                        <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                          <h3>Install DAR from URL</h3>
+                          <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                            Enter the base URL of the app. The DAR will be fetched from <code>/api/package</code>.
+                          </p>
+                          <div className="form-group">
+                            <label>App URL</label>
+                            <input
+                              type="url"
+                              value={darInstallUrl}
+                              onChange={(e) => setDarInstallUrl(e.target.value)}
+                              placeholder="https://example.com"
+                              disabled={darUploading}
+                            />
+                          </div>
+                          <div className="modal-actions">
+                            <button
+                              onClick={() => {
+                                setShowInstallFromUrl(false);
+                                setDarInstallUrl('');
+                              }}
+                              className="cancel-btn"
+                              disabled={darUploading}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={handleDarInstallFromUrl}
+                              className="send-btn admin-btn"
+                              disabled={darUploading || !darInstallUrl.trim()}
+                            >
+                              {darUploading ? 'Installing...' : 'Install'}
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                    ))}
+                    )}
+
+                    {darUploadStatus && (
+                      <div className={`transfer-status ${darUploadStatus.includes('Error') ? 'error' : 'success'}`} style={{ marginBottom: '1rem' }}>
+                        {darUploadStatus}
+                      </div>
+                    )}
+
+                    <div className="admin-packages-list">
+                      {packagesLoading ? (
+                        <div className="no-transactions">Loading packages...</div>
+                      ) : packageIds.length === 0 ? (
+                        <div className="no-transactions">No packages found</div>
+                      ) : (
+                        <div className="packages-grid">
+                          {packageIds.map((pkgId) => (
+                            <div key={pkgId} className="package-item">
+                              <code title={pkgId}>{pkgId.substring(0, 24)}...</code>
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(pkgId);
+                                  setDarUploadStatus('Package ID copied!');
+                                  setTimeout(() => setDarUploadStatus(''), 2000);
+                                }}
+                                className="copy-btn"
+                                title="Copy package ID"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
                 </div>
-              </section>
+              </div>
             )}
 
             {/* RPC Endpoints Section */}
@@ -4305,12 +4679,14 @@ function App() {
                             <th>URL</th>
                             <th>Order</th>
                             <th>Status</th>
+                            {superadminUser.isSuperadmin && <th>Access</th>}
                             {superadminUser.isSuperadmin && <th>Actions</th>}
                           </tr>
                         </thead>
                         <tbody>
                           {appsList.map(app => {
                             const pkgStatus = appPackageStatus[app.id];
+                            const accessCount = appAccessMap[app.id]?.length || 0;
                             return (
                             <tr key={app.id} className={app.is_enabled === 0 ? 'disabled-row' : ''}>
                               <td>
@@ -4341,6 +4717,18 @@ function App() {
                                   {app.is_enabled ? 'Enabled' : 'Disabled'}
                                 </button>
                               </td>
+                              {superadminUser.isSuperadmin && (
+                                <td>
+                                  <button
+                                    onClick={() => setAppAccessModalApp(app)}
+                                    className={`status-badge ${accessCount > 0 ? 'enabled' : ''}`}
+                                    style={{ cursor: 'pointer', minWidth: '60px' }}
+                                    title={accessCount > 0 ? `${accessCount} user(s) assigned` : 'All users (open access)'}
+                                  >
+                                    {accessCount > 0 ? `${accessCount} user${accessCount !== 1 ? 's' : ''}` : 'All'}
+                                  </button>
+                                </td>
+                              )}
                               {superadminUser.isSuperadmin && (
                                 <td>
                                   <div className="action-buttons">
@@ -4425,14 +4813,24 @@ function App() {
                     </div>
                     <div className="form-group">
                       <label>Icon (emoji or character)</label>
-                      <input
-                        type="text"
-                        value={newApp.icon}
-                        onChange={(e) => setNewApp({...newApp, icon: e.target.value})}
-                        placeholder="e.g., 🚀"
-                        required
-                        maxLength={4}
-                      />
+                      <div className="emoji-input-wrapper">
+                        <input
+                          type="text"
+                          value={newApp.icon}
+                          onChange={(e) => setNewApp({...newApp, icon: e.target.value})}
+                          placeholder="e.g., 🚀"
+                          required
+                          maxLength={4}
+                        />
+                        <button
+                          type="button"
+                          className="emoji-picker-toggle"
+                          onClick={() => setEmojiPickerTarget(emojiPickerTarget === 'new' ? null : 'new')}
+                        >
+                          {newApp.icon || '😀'}
+                        </button>
+                        {renderEmojiPicker('new')}
+                      </div>
                     </div>
                     <div className="form-group">
                       <label>Color (hex)</label>
@@ -4512,14 +4910,24 @@ function App() {
                     </div>
                     <div className="form-group">
                       <label>Icon (emoji or character)</label>
-                      <input
-                        type="text"
-                        value={editingApp.icon}
-                        onChange={(e) => setEditingApp({...editingApp, icon: e.target.value})}
-                        placeholder="e.g., 🚀"
-                        required
-                        maxLength={4}
-                      />
+                      <div className="emoji-input-wrapper">
+                        <input
+                          type="text"
+                          value={editingApp.icon}
+                          onChange={(e) => setEditingApp({...editingApp, icon: e.target.value})}
+                          placeholder="e.g., 🚀"
+                          required
+                          maxLength={4}
+                        />
+                        <button
+                          type="button"
+                          className="emoji-picker-toggle"
+                          onClick={() => setEmojiPickerTarget(emojiPickerTarget === 'edit' ? null : 'edit')}
+                        >
+                          {editingApp.icon || '😀'}
+                        </button>
+                        {renderEmojiPicker('edit')}
+                      </div>
                     </div>
                     <div className="form-group">
                       <label>Color (hex)</label>
@@ -4570,6 +4978,113 @@ function App() {
                 </div>
               </div>
             )}
+
+            {/* App Access Modal */}
+            {appAccessModalApp && (() => {
+              const assignedUsers = appAccessUsers[appAccessModalApp.id] || [];
+              const assignedIds = new Set(appAccessMap[appAccessModalApp.id] || []);
+              const searchLower = appAccessSearch.toLowerCase().trim();
+              const suggestions = searchLower.length > 0
+                ? dbUsers.filter(u =>
+                    !assignedIds.has(u.id) &&
+                    (u.username.toLowerCase().includes(searchLower) ||
+                     (u.display_name || '').toLowerCase().includes(searchLower))
+                  ).slice(0, 8)
+                : [];
+              return (
+              <div className="modal-overlay" onClick={() => { setAppAccessModalApp(null); setAppAccessSearch(''); }}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
+                  <h2>App Access: {appAccessModalApp.name}</h2>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                    {assignedUsers.length === 0
+                      ? 'No users assigned — this app is visible to everyone.'
+                      : `${assignedUsers.length} user${assignedUsers.length !== 1 ? 's' : ''} assigned. Only these users can see this app.`}
+                  </p>
+
+                  {/* Search and add user */}
+                  <div style={{ position: 'relative', marginBottom: '1rem' }}>
+                    <input
+                      type="text"
+                      value={appAccessSearch}
+                      onChange={(e) => setAppAccessSearch(e.target.value)}
+                      placeholder="Search users to add..."
+                      style={{ width: '100%' }}
+                      autoFocus
+                    />
+                    {suggestions.length > 0 && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
+                        background: 'var(--card-bg)', border: '1px solid var(--border-color)',
+                        borderRadius: '8px', marginTop: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                        maxHeight: '200px', overflowY: 'auto'
+                      }}>
+                        {suggestions.map(user => (
+                          <button
+                            key={user.id}
+                            onClick={() => {
+                              handleGrantAppAccess(user.id, appAccessModalApp.id);
+                              setAppAccessSearch('');
+                            }}
+                            style={{
+                              display: 'block', width: '100%', padding: '0.5rem 0.75rem',
+                              background: 'transparent', border: 'none', textAlign: 'left',
+                              cursor: 'pointer', color: 'var(--text-primary)', fontSize: '0.85rem'
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--accent-bg-hover)')}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                          >
+                            <strong>{user.display_name || user.username}</strong>
+                            <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem' }}>@{user.username}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {searchLower.length > 0 && suggestions.length === 0 && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0,
+                        background: 'var(--card-bg)', border: '1px solid var(--border-color)',
+                        borderRadius: '8px', marginTop: '4px', padding: '0.5rem 0.75rem',
+                        color: 'var(--text-secondary)', fontSize: '0.85rem'
+                      }}>
+                        No matching users found
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Assigned users list */}
+                  <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    {assignedUsers.length === 0 ? (
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0.5rem 0' }}>
+                        No users assigned. Search above to add users.
+                      </div>
+                    ) : (
+                      assignedUsers.map((user) => (
+                        <div key={user.user_id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid var(--border-color)' }}>
+                          <div>
+                            <strong>{user.display_name || user.username}</strong>
+                            <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem', fontSize: '0.85rem' }}>@{user.username}</span>
+                          </div>
+                          <button
+                            onClick={() => handleRevokeAppAccess(user.user_id, appAccessModalApp.id)}
+                            className="btn-delete"
+                            style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="modal-buttons" style={{ marginTop: '1rem' }}>
+                    <button onClick={() => { setAppAccessModalApp(null); setAppAccessSearch(''); }} className="refresh-btn">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+              );
+            })()}
           </main>
         </div>
 
@@ -4709,6 +5224,7 @@ function App() {
                   <select
                     value={newCodeType}
                     onChange={(e) => setNewCodeType(e.target.value as 'general' | 'reserved_username')}
+                    className="role-select"
                   >
                     <option value="general">General</option>
                     <option value="reserved_username">Reserved Username</option>
@@ -4724,20 +5240,22 @@ function App() {
                       placeholder="e.g., alice"
                       required
                     />
-                    <small style={{ color: 'var(--text-secondary)' }}>Only this username can register with this code</small>
+                    <small style={{ color: 'var(--text-secondary)' }}>Only this username can register with this code (single use)</small>
                   </div>
                 )}
-                <div className="form-group">
-                  <label>Max Uses</label>
-                  <input
-                    type="number"
-                    value={newCodeMaxUses}
-                    onChange={(e) => setNewCodeMaxUses(e.target.value)}
-                    placeholder="e.g., 10"
-                    min="1"
-                    required
-                  />
-                </div>
+                {newCodeType !== 'reserved_username' && (
+                  <div className="form-group">
+                    <label>Max Uses</label>
+                    <input
+                      type="number"
+                      value={newCodeMaxUses}
+                      onChange={(e) => setNewCodeMaxUses(e.target.value)}
+                      placeholder="e.g., 10"
+                      min="1"
+                      required
+                    />
+                  </div>
+                )}
                 <div className="form-group">
                   <label>Expiry Date (optional)</label>
                   <input
@@ -4793,6 +5311,9 @@ function App() {
       <div className={`app theme-${theme}`}>
         <div className="login-container">
           <div className="login-card">
+            <div className="login-logo">
+              <img src={customLogo || '/logo.png'} alt={orgName} />
+            </div>
             <h1>{orgName}</h1>
             <p className="login-subtitle">Secure Digital Asset Management</p>
 
@@ -4800,76 +5321,88 @@ function App() {
               <div className="login-error">{loginError}</div>
             )}
 
-            {/* Register section - username input + register button */}
-            <div className="form-group">
-              <label>{codeValidation.codeType === 'reserved_username' ? 'Username (set by invite)' : 'Create Account'}</label>
-              <input
-                type="text"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                placeholder={codeValidation.codeType === 'reserved_username' ? 'Username set by invite code' : 'Choose a username'}
-                disabled={!codeValidation.valid || codeValidation.codeType === 'reserved_username'}
-                readOnly={codeValidation.codeType === 'reserved_username'}
-                style={codeValidation.codeType === 'reserved_username' ? { opacity: 0.7, cursor: 'not-allowed' } : {}}
-              />
-            </div>
-
-            {/* Registration code status */}
-            {codeValidation.checked && (
-              <div style={{ marginBottom: '1rem', padding: '0.75rem', borderRadius: '8px', fontSize: '0.9rem',
-                backgroundColor: codeValidation.valid ? 'rgba(40, 167, 69, 0.1)' : 'rgba(220, 53, 69, 0.1)',
-                border: `1px solid ${codeValidation.valid ? 'rgba(40, 167, 69, 0.3)' : 'rgba(220, 53, 69, 0.3)'}`,
-                color: codeValidation.valid ? '#28a745' : '#dc3545'
-              }}>
-                {codeValidation.valid ? (
-                  codeValidation.codeType === 'reserved_username' ? (
-                    <>Registration code valid - register as {codeValidation.reservedUsername}</>
-                  ) : (
-                    <>Registration code valid ({codeValidation.usesRemaining} uses remaining)</>
-                  )
-                ) : codeValidation.reason === 'no_code' ? (
-                  <>Registration code required. Contact admin for a registration link.</>
-                ) : codeValidation.reason === 'invalid_code' ? (
-                  <>Invalid registration code</>
-                ) : codeValidation.reason === 'expired' ? (
-                  <>Registration code has expired</>
-                ) : codeValidation.reason === 'depleted' ? (
-                  <>Registration code has been fully used</>
-                ) : (
-                  <>Unable to validate registration code</>
-                )}
-              </div>
-            )}
-
-            <button
-              onClick={() => { setAuthMode('register'); handlePasskeyRegister(); }}
-              className="send-btn"
-              disabled={authLoading || !codeValidation.valid}
-              style={!codeValidation.valid ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
-            >
-              {authLoading && authMode === 'register' ? 'Please wait...' : 'Register with Passkey'}
-            </button>
-
-            <p className="passkey-info">
-              Create an account using your device biometrics or security key
-            </p>
-
-            <div className="login-divider">
-              <span>or</span>
-            </div>
-
-            {/* Sign in section - no username input */}
+            {/* Sign in section */}
             <button
               onClick={() => { setAuthMode('login'); handlePasskeyLogin(); }}
-              className="btn-secondary"
+              className="login-btn-primary"
               disabled={authLoading}
             >
-              {authLoading && authMode === 'login' ? 'Please wait...' : 'Sign In with Passkey'}
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                <polyline points="10 17 15 12 10 7"/>
+                <line x1="15" y1="12" x2="3" y2="12"/>
+              </svg>
+              {authLoading && authMode === 'login' ? 'Authenticating...' : 'Sign In'}
             </button>
 
-            <p className="passkey-info">
-              Sign in using your registered passkey
-            </p>
+            {/* Create Account - collapsed by default */}
+            {authMode !== 'register' ? (
+              <button
+                onClick={() => setAuthMode('register')}
+                className="login-btn-ghost"
+              >
+                Create Account
+              </button>
+            ) : (
+              <div className="login-register-panel">
+                <div className="login-field">
+                  <label>{codeValidation.codeType === 'reserved_username' ? 'Username (set by invite)' : 'Username'}</label>
+                  <input
+                    type="text"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder={codeValidation.codeType === 'reserved_username' ? 'Set by invite code' : 'Choose a username'}
+                    disabled={!codeValidation.valid || codeValidation.codeType === 'reserved_username'}
+                    readOnly={codeValidation.codeType === 'reserved_username'}
+                    className={codeValidation.codeType === 'reserved_username' ? 'readonly' : ''}
+                  />
+                </div>
+
+                {/* Registration code status */}
+                {codeValidation.checked && (
+                  <div className={`login-code-status ${codeValidation.valid ? 'valid' : 'invalid'}`}>
+                    {codeValidation.valid ? (
+                      codeValidation.codeType === 'reserved_username' ? (
+                        <>Invite valid &mdash; registering as <strong>{codeValidation.reservedUsername}</strong></>
+                      ) : (
+                        <>Code valid &mdash; {codeValidation.usesRemaining} use{codeValidation.usesRemaining !== 1 ? 's' : ''} remaining</>
+                      )
+                    ) : codeValidation.reason === 'no_code' ? (
+                      <>Registration code required</>
+                    ) : codeValidation.reason === 'invalid_code' ? (
+                      <>Invalid registration code</>
+                    ) : codeValidation.reason === 'expired' ? (
+                      <>Code expired</>
+                    ) : codeValidation.reason === 'depleted' ? (
+                      <>Code fully used</>
+                    ) : (
+                      <>Unable to validate code</>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => handlePasskeyRegister()}
+                  className="login-btn-primary"
+                  disabled={authLoading || !codeValidation.valid}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <line x1="19" y1="8" x2="19" y2="14"/>
+                    <line x1="22" y1="11" x2="16" y2="11"/>
+                  </svg>
+                  {authLoading && authMode === 'register' ? 'Authenticating...' : 'Register'}
+                </button>
+
+                <button
+                  onClick={() => setAuthMode('login')}
+                  className="login-btn-ghost"
+                >
+                  Back to Sign In
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -4903,12 +5436,6 @@ function App() {
           }))}
           chainAddresses={chainAddresses.map(a => ({ ...a, icon: a.icon || '●' }))}
           scannedAddress={transferTo}
-          networkMode={networkMode}
-          onNetworkModeChange={(mode) => {
-            setNetworkMode(mode);
-            localStorage.setItem('walletNetworkMode', mode);
-            loadWalletData(true, mode); // Force refresh balances with new network (pass mode directly to avoid stale state)
-          }}
           onLogout={handleLogout}
           onRefresh={() => loadWalletData(true)}
           onAddAsset={() => setShowAddAssetModal(true)}
@@ -5146,6 +5673,40 @@ function App() {
               <button className="app-window-close" onClick={() => setShowSettingsModal(false)}>✕</button>
             </div>
             <div className="app-window-content">
+              {/* Network Mode */}
+              <div className="settings-section">
+                <div className="settings-section-header">
+                  <span className="settings-section-label">Network</span>
+                </div>
+                <div className="config-item" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 0' }}>
+                  <span style={{ fontSize: '0.85rem' }}>{networkMode === 'mainnet' ? 'Mainnet' : 'Testnet'}</span>
+                  <label className="network-switch" title={networkMode === 'mainnet' ? 'Switch to Testnet' : 'Switch to Mainnet'}>
+                    <input
+                      type="checkbox"
+                      checked={networkMode === 'testnet'}
+                      onChange={(e) => {
+                        const mode = e.target.checked ? 'testnet' : 'mainnet';
+                        setNetworkMode(mode);
+                        localStorage.setItem('walletNetworkMode', mode);
+                        loadWalletData(true, mode);
+                      }}
+                    />
+                    <span className="switch-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              {authUser?.id && (
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <span className="settings-section-label">User ID</span>
+                  </div>
+                  <div className="config-item" style={{ fontSize: '0.8rem', fontFamily: 'monospace', wordBreak: 'break-all', opacity: 0.7, padding: '0.5rem 0' }}>
+                    {authUser.id}
+                  </div>
+                </div>
+              )}
+
               <div className="settings-section-header">
                 <span className="settings-section-label">Passkeys</span>
                 <span className="passkey-count">{passkeys.length}/5</span>
@@ -5422,6 +5983,7 @@ function App() {
         return (
           <div
             key={appId}
+            data-floating-app={isFloating ? appId : undefined}
             className={`app-window ${shouldShow ? 'visible' : 'hidden'} ${isFloating ? 'floating' : ''}`}
             style={shouldShow ? (isFloating
               ? { display: 'flex', left: floatState.x, top: floatState.y, width: floatState.width, height: floatState.height, zIndex: focusedApp === appId ? 910 : 901 }
@@ -5435,7 +5997,7 @@ function App() {
               onTouchStart={(e) => { if (isFloating) startAppDrag(appId, e); }}
             >
               <div className="app-window-title">
-                {app.name}
+                <span className="app-window-icon">{app.icon}</span> {app.name}
               </div>
               <div style={{ display: 'flex', alignItems: 'center' }}>
                 <button
@@ -5579,6 +6141,11 @@ function App() {
               <div className="chat-message-content">{msg.content}</div>
             </div>
           ))}
+          {chatLoading && (
+            <div className="chat-message assistant">
+              <div className="chat-message-content chat-typing">Thinking...</div>
+            </div>
+          )}
         </div>
         <form className="chat-input-form" onSubmit={handleSendChat}>
           <input
@@ -5587,8 +6154,9 @@ function App() {
             onChange={(e) => setChatInput(e.target.value)}
             placeholder="Ask me anything..."
             className="chat-input"
+            disabled={chatLoading}
           />
-          <button type="submit" className="chat-send-btn" aria-label="Send">
+          <button type="submit" className="chat-send-btn" aria-label="Send" disabled={chatLoading}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M22 2L11 13" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

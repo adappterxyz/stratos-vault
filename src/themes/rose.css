@@ -1,0 +1,22 @@
+/*
+ * Rose/Red Theme
+ */
+.theme-rose {
+  --primary: #f43f5e;
+  --primary-light: #fb7185;
+  --primary-dark: #e11d48;
+  --secondary: #ec4899;
+  --gradient-start: #f43f5e;
+  --gradient-end: #ec4899;
+  --bg-gradient-start: #1f0f14;
+  --bg-gradient-end: #2d1520;
+  --accent-bg: rgba(244, 63, 94, 0.1);
+  --accent-bg-hover: rgba(244, 63, 94, 0.2);
+  --accent-border: rgba(244, 63, 94, 0.2);
+  --accent-border-hover: rgba(244, 63, 94, 0.3);
+  --sidebar-bg-start: rgba(31, 15, 20, 0.98);
+  --sidebar-bg-end: rgba(45, 21, 32, 0.98);
+  --sidebar-toggle-bg: rgba(244, 63, 94, 0.15);
+  --sidebar-toggle-border: rgba(244, 63, 94, 0.3);
+  --sidebar-toggle-hover: rgba(244, 63, 94, 0.25);
+}

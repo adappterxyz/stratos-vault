@@ -1,0 +1,22 @@
+/*
+ * Teal Theme
+ */
+.theme-teal {
+  --primary: #14b8a6;
+  --primary-light: #2dd4bf;
+  --primary-dark: #0d9488;
+  --secondary: #06b6d4;
+  --gradient-start: #14b8a6;
+  --gradient-end: #06b6d4;
+  --bg-gradient-start: #0f2b2a;
+  --bg-gradient-end: #1a3a3a;
+  --accent-bg: rgba(20, 184, 166, 0.1);
+  --accent-bg-hover: rgba(20, 184, 166, 0.2);
+  --accent-border: rgba(20, 184, 166, 0.2);
+  --accent-border-hover: rgba(20, 184, 166, 0.3);
+  --sidebar-bg-start: rgba(15, 43, 42, 0.98);
+  --sidebar-bg-end: rgba(26, 58, 58, 0.98);
+  --sidebar-toggle-bg: rgba(20, 184, 166, 0.15);
+  --sidebar-toggle-border: rgba(20, 184, 166, 0.3);
+  --sidebar-toggle-hover: rgba(20, 184, 166, 0.25);
+}

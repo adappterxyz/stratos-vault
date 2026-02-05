@@ -19,6 +19,7 @@ body {
   padding: 1rem;
   box-sizing: border-box;
   position: relative;
+  min-height: 100vh;
 }
 
 header {
@@ -26,7 +27,7 @@ header {
   margin-bottom: 3rem;
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   padding: 2rem;
-  border-radius: 16px;
+  border-radius: 10px;
   border: 1px solid var(--accent-border);
 }
 
@@ -42,7 +43,7 @@ header h1 {
 .wallet-info {
   background: var(--accent-bg);
   border: 1px solid var(--accent-border);
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 1rem;
   font-size: 0.85rem;
   margin-top: 1rem;
@@ -150,11 +151,10 @@ header h1 {
 .wallet-card {
   position: relative;
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-  border-radius: 12px;
+  border-radius: 6px;
   border: 1px solid var(--accent-border);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-  width: 100%;
-  max-width: 320px;
+  width: 320px;
   max-height: calc(100vh - 2rem);
   transition: transform 0.3s ease, opacity 0.3s ease;
   overflow: hidden;
@@ -216,10 +216,11 @@ header h1 {
   transition: opacity 0.2s ease;
   box-sizing: border-box;
   width: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Wallet Header */
@@ -227,9 +228,11 @@ header h1 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.5rem;
-  padding-bottom: 0.5rem;
+  margin: -0.75rem -0.75rem 0.5rem -0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   border-bottom: 1px solid var(--accent-border);
+  border-radius: 6px 6px 0 0;
 }
 
 .wallet-title {
@@ -439,7 +442,7 @@ header h1 {
   flex: 1;
   padding: 0.5rem 0.6rem;
   border: 1px solid var(--accent-border-hover);
-  border-radius: 5px;
+  border-radius: 6px;
   font-size: 0.75rem;
   background: rgba(0, 0, 0, 0.2);
   color: #e4e4e7;
@@ -467,7 +470,7 @@ header h1 {
   height: auto;
   flex-shrink: 0;
   border: 1px solid var(--accent-border-hover);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--accent-bg);
   color: var(--primary-light);
   cursor: pointer;
@@ -513,7 +516,7 @@ header h1 {
   color: white;
   border: none;
   padding: 0.5rem 1rem;
-  border-radius: 5px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 0.75rem;
   font-weight: 600;
@@ -602,7 +605,7 @@ header h1 {
   gap: 0.4rem;
   padding: 0.3rem 0.4rem;
   background: rgba(0, 0, 0, 0.1);
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 0.7rem;
 }
 
@@ -681,7 +684,7 @@ header h1 {
   color: #71717a;
   background: rgba(255, 255, 255, 0.05);
   padding: 0.1rem 0.3rem;
-  border-radius: 3px;
+  border-radius: 4px;
   margin-left: 0.3rem;
 }
 
@@ -725,8 +728,8 @@ header h1 {
 }
 
 .transactions-modal .modal-content {
-  background: var(--card-bg);
-  border-radius: 12px;
+  background: var(--bg-gradient-start);
+  border-radius: 10px;
   width: 100%;
   max-width: 500px;
   max-height: 80vh;
@@ -832,7 +835,7 @@ header h1 {
   color: #71717a;
   background: rgba(255, 255, 255, 0.05);
   padding: 0.1rem 0.3rem;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 
 .tx-date-full {
@@ -843,7 +846,7 @@ header h1 {
 .tx-status-badge {
   font-size: 0.5rem;
   padding: 0.1rem 0.25rem;
-  border-radius: 3px;
+  border-radius: 4px;
   text-transform: uppercase;
 }
 
@@ -946,6 +949,51 @@ header h1 {
 
 .section-arrow.expanded {
   transform: rotate(90deg);
+}
+
+/* Wallet Tabs */
+.wallet-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.wallet-tab {
+  padding: 0.35rem 0.7rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #71717a;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.wallet-tab:hover {
+  color: var(--primary-light);
+  background: var(--accent-bg);
+}
+
+.wallet-tab.active {
+  color: var(--primary-light);
+  background: var(--accent-bg);
+  border-color: var(--accent-border-hover);
+}
+
+.wallet-tab-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.wallet-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Addresses List */
@@ -1260,7 +1308,7 @@ header h1 {
 .asset-modal {
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   border: 1px solid var(--accent-border-hover);
-  border-radius: 16px;
+  border-radius: 10px;
   padding: 1.5rem;
   width: 100%;
   max-width: 360px;
@@ -1422,7 +1470,7 @@ header h1 {
 .qr-scanner-modal {
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   border: 1px solid var(--accent-border-hover);
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 1rem;
   width: 300px;
   max-width: 90%;
@@ -1465,7 +1513,7 @@ header h1 {
 .transfer-card,
 .transactions-card {
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-  border-radius: 16px;
+  border-radius: 10px;
   padding: 2rem;
   border: 1px solid var(--accent-border);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -1608,7 +1656,7 @@ header h1 {
   padding: 1.25rem;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(139, 92, 246, 0.1);
-  border-radius: 12px;
+  border-radius: 10px;
   transition: all 0.2s;
 }
 
@@ -1712,7 +1760,7 @@ header h1 {
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   border: 1px solid var(--accent-border-hover);
   padding: 2rem;
-  border-radius: 16px;
+  border-radius: 10px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
   max-width: 500px;
   width: 90%;
@@ -1760,62 +1808,183 @@ header h1 {
   left: 0;
   right: 0;
   bottom: 0;
+  background: radial-gradient(ellipse at 50% 0%, var(--accent-bg) 0%, transparent 60%);
 }
 
 .login-card {
-  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-  border: 1px solid var(--accent-border-hover);
-  border-radius: 24px;
-  padding: 3rem;
-  max-width: 400px;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  padding: 2.5rem 2rem 2rem;
+  max-width: 360px;
   width: 100%;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 1px 0 0 rgba(255,255,255,0.03) inset, 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.login-logo {
+  text-align: center;
+  margin-bottom: 1.25rem;
+}
+
+.login-logo img {
+  width: 56px;
+  height: 56px;
 }
 
 .login-card h1 {
-  font-size: 2.5rem;
-  margin-bottom: 0.5rem;
+  font-size: 1.5rem;
+  margin-bottom: 0.25rem;
   background: linear-gradient(135deg, var(--primary-light) 0%, var(--secondary) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   text-align: center;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .login-subtitle {
   text-align: center;
-  color: #a1a1aa;
-  margin-bottom: 2.5rem;
-  font-size: 0.95rem;
+  color: rgba(255,255,255,0.35);
+  margin-bottom: 2rem;
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+.login-btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.7rem 1.5rem;
+  background: linear-gradient(135deg, var(--gradient-start) 0%, var(--gradient-end) 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 8px var(--accent-bg-hover);
+}
+
+.login-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 4px 16px var(--accent-bg-hover);
+}
+
+.login-btn-primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.login-btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.login-btn-ghost {
+  display: block;
+  width: 100%;
+  padding: 0.6rem 1.5rem;
+  margin-top: 0.5rem;
+  background: none;
+  color: rgba(255,255,255,0.4);
+  border: none;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.login-btn-ghost:hover {
+  color: var(--primary-light);
+  background: var(--accent-bg);
+}
+
+.login-register-panel {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--accent-border);
+}
+
+.login-field {
+  margin-bottom: 0.75rem;
+}
+
+.login-field label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: rgba(255,255,255,0.5);
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.login-field input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: rgba(0, 0, 0, 0.25);
+  color: #e4e4e7;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+.login-field input::placeholder {
+  color: rgba(255,255,255,0.2);
+}
+
+.login-field input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.login-field input.readonly {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.login-code-status {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+.login-code-status.valid {
+  background: rgba(40, 167, 69, 0.08);
+  border: 1px solid rgba(40, 167, 69, 0.2);
+  color: #4ade80;
+}
+
+.login-code-status.invalid {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #f87171;
+}
+
+.login-error {
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+  text-align: center;
 }
 
 .login-mode-selector {
   display: none;
-}
-
-.mode-btn {
-  padding: 0.875rem;
-  border: 1px solid var(--accent-border);
-  background: transparent;
-  color: #a1a1aa;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.95rem;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-
-.mode-btn:hover {
-  background: var(--accent-bg);
-  border-color: var(--accent-border-hover);
-  color: #e4e4e7;
-}
-
-.mode-btn.active {
-  background: linear-gradient(135deg, var(--gradient-start) 0%, var(--gradient-end) 100%);
-  border-color: transparent;
-  color: white;
-  box-shadow: 0 4px 12px var(--accent-bg-hover);
 }
 
 .admin-login-info {
@@ -1823,19 +1992,8 @@ header h1 {
   text-align: center;
   color: #a1a1aa;
   background: rgba(0, 0, 0, 0.2);
-  border-radius: 12px;
+  border-radius: 10px;
   margin-bottom: 1.5rem;
-}
-
-.login-error {
-  background: rgba(239, 68, 68, 0.1);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  padding: 0.875rem;
-  border-radius: 8px;
-  margin-bottom: 1rem;
-  font-size: 0.9rem;
-  text-align: center;
 }
 
 .login-divider {
@@ -1930,7 +2088,7 @@ header h1 {
   background: rgba(139, 92, 246, 0.1);
   border: 1px solid rgba(139, 92, 246, 0.2);
   padding: 1rem;
-  border-radius: 12px;
+  border-radius: 10px;
   text-align: center;
   color: #e4e4e7;
   font-size: 0.95rem;
@@ -1975,13 +2133,13 @@ header h1 {
   }
 
   .login-card {
-    padding: 1.5rem;
+    padding: 1.5rem 1.25rem;
     margin: 0.5rem;
     max-width: calc(100vw - 1rem);
   }
 
   .login-card h1 {
-    font-size: 1.75rem;
+    font-size: 1.35rem;
   }
 
   .header-top {
@@ -2179,8 +2337,8 @@ header h1 {
 }
 
 .rpc-network-toggle .toggle-btn.active {
-  background: var(--card-bg);
-  color: var(--text-primary);
+  background: var(--primary);
+  color: white;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
@@ -2209,7 +2367,7 @@ header h1 {
 .rpc-chain-card {
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 1rem;
   transition: border-color 0.2s ease;
 }
@@ -2336,7 +2494,7 @@ header h1 {
 
 .status-badge {
   padding: 0.25rem 0.75rem;
-  border-radius: 12px;
+  border-radius: 10px;
   font-size: 0.75rem;
   font-weight: 600;
   border: none;
@@ -2519,7 +2677,7 @@ header h1 {
 
 .admin-card {
   background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
-  border-radius: 16px;
+  border-radius: 10px;
   padding: 1.5rem;
   border: 1px solid var(--accent-border);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -2546,7 +2704,7 @@ header h1 {
   transition: background 0.2s;
   margin: -1rem -1rem 1rem -1rem;
   padding: 1rem;
-  border-radius: 12px 12px 0 0;
+  border-radius: 10px 10px 0 0;
 }
 
 .admin-card-header.clickable:hover {
@@ -2584,6 +2742,11 @@ header h1 {
 /* Admin Users Table */
 .admin-users-table {
   overflow-x: auto;
+}
+
+.user-mgmt-table .admin-table-header,
+.user-mgmt-table .admin-table-row {
+  grid-template-columns: 1fr 1fr 1.5fr auto;
 }
 
 .admin-table-header {
@@ -2737,7 +2900,7 @@ header h1 {
   padding: 1.25rem;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid var(--accent-border);
-  border-radius: 12px;
+  border-radius: 10px;
   transition: all 0.2s;
 }
 
@@ -3096,8 +3259,8 @@ outline:none;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 1rem;
-  
+  border-radius: 10px;
+
 }
 .dock {
   animation: glow 4s ease-in-out infinite;
@@ -3139,7 +3302,7 @@ outline:none;
 .dock-icon {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: 10px;
   background: linear-gradient(135deg, var(--app-color, #8b5cf6) 0%, color-mix(in srgb, var(--app-color, #8b5cf6) 70%, #000) 100%);
   display: flex;
   align-items: center;
@@ -3250,8 +3413,8 @@ outline:none;
   align-items: center;
   justify-content: space-between;
   padding: 0.4rem 1rem;
-  background: rgba(0, 0, 0, 0.3);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--bg-gradient-start) 80%, black) 0%, color-mix(in srgb, var(--bg-gradient-end) 80%, black) 100%);
+  border-bottom: 1px solid var(--accent-border);
 }
 
 /* Window title */
@@ -3726,7 +3889,7 @@ outline:none;
   padding: 0.75rem 1rem;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 1.5rem;
+  border-radius: 8px;
   color: #fff;
   font-size: 0.875rem;
   outline: none;
@@ -3770,6 +3933,23 @@ outline:none;
 
 .chat-send-btn:active {
   transform: scale(0.95);
+}
+
+.chat-send-btn:disabled,
+.chat-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-typing {
+  animation: chatPulse 1.5s ease-in-out infinite;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+@keyframes chatPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
 }
 
 /* Adjust main content when chat is open */
@@ -3877,6 +4057,13 @@ outline:none;
 .config-item span {
   color: #e4e4e7;
   font-size: 0.95rem;
+}
+
+.field-descriptor {
+  color: rgba(255, 255, 255, 0.4) !important;
+  font-size: 0.78rem !important;
+  font-style: italic;
+  margin-top: -0.1rem;
 }
 
 .override-badge {
@@ -4031,9 +4218,13 @@ outline:none;
 }
 
 .sidebar-nav-item.active {
-  background: var(--accent-bg);
-  color: var(--primary);
-  border-left: 3px solid var(--primary);
+  background: var(--primary);
+  color: white;
+  border-radius: 8px;
+}
+
+.sidebar-nav-item:focus {
+  outline: none;
 }
 
 .sidebar-nav-item .nav-icon {
@@ -4240,18 +4431,20 @@ outline:none;
   left: auto;
   right: auto;
   bottom: auto;
-  border-radius: 12px;
+  border-radius: 6px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.1);
   animation: none;
   overflow: visible;
+  will-change: left, top, width, height;
+  contain: layout style;
 }
 
 .app-window.floating .app-window-header {
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
-  border-radius: 12px 12px 0 0;
+  border-radius: 6px 6px 0 0;
 }
 
 .app-window.floating .app-window-header:active {
@@ -4259,7 +4452,7 @@ outline:none;
 }
 
 .app-window.floating .app-window-content {
-  border-radius: 0 0 12px 12px;
+  border-radius: 0 0 6px 6px;
   position: relative;
   z-index: 1;
 }
@@ -4331,7 +4524,7 @@ outline:none;
 .settings-window {
   background: linear-gradient(180deg, #1a1a2e 0%, #0f0f23 100%);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
+  border-radius: 6px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   width: 400px;
   max-width: 90vw;
@@ -4506,5 +4699,82 @@ outline:none;
 }
 
 .btn-settings:hover {
+  background: var(--accent-bg-hover);
+}
+
+/* App window header icon */
+.app-window-icon {
+  margin-right: 0.25rem;
+  font-size: 1rem;
+}
+
+/* Emoji picker */
+.emoji-input-wrapper {
+  position: relative;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.emoji-input-wrapper input {
+  flex: 1;
+}
+
+.emoji-picker-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-border-hover);
+  background: var(--accent-bg);
+  font-size: 1.25rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.emoji-picker-toggle:hover {
+  background: var(--accent-bg-hover);
+  border-color: var(--accent-border-hover);
+  transform: scale(1.05);
+}
+
+.emoji-picker-grid {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 0.5rem;
+  background: var(--bg-gradient-start);
+  border: 1px solid var(--accent-border-hover);
+  border-radius: 8px;
+  padding: 0.25rem;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 1px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  max-height: 200px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.emoji-picker-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-size: 1.1rem;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0;
+  transition: background 0.1s;
+}
+
+.emoji-picker-item:hover {
   background: var(--accent-bg-hover);
 }

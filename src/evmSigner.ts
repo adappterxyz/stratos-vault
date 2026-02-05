@@ -9,14 +9,18 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
-// ZAN.top RPC endpoints
-const ZAN_API_KEY = '4a6373aaef354ba88416fbe73cd1c616';
+// RPC endpoints - must be set via setEvmRpcEndpoints() from config
+let rpcEndpoints: Record<number, string> = {};
 
-export const RPC_ENDPOINTS: Record<number, string> = {
-  1: `https://api.zan.top/node/v1/eth/mainnet/${ZAN_API_KEY}`,         // Ethereum Mainnet
-  11155111: `https://api.zan.top/node/v1/eth/sepolia/${ZAN_API_KEY}`,  // Ethereum Sepolia (testnet)
-  8453: `https://api.zan.top/node/v1/base/mainnet/${ZAN_API_KEY}`,     // Base
-};
+// Set RPC endpoints from config
+export function setEvmRpcEndpoints(endpoints: Record<number | string, string>): void {
+  // Convert string keys to numbers
+  const converted: Record<number, string> = {};
+  for (const [key, value] of Object.entries(endpoints)) {
+    converted[Number(key)] = value;
+  }
+  rpcEndpoints = converted;
+}
 
 export interface EVMTransaction {
   to: string;
@@ -125,9 +129,9 @@ function parseHex(value: string): Uint8Array {
 
 // RPC Call
 async function rpcCall(chainId: number, method: string, params: any[]): Promise<any> {
-  const rpcUrl = RPC_ENDPOINTS[chainId];
+  const rpcUrl = rpcEndpoints[chainId];
   if (!rpcUrl) {
-    throw new Error(`Unsupported chain ID: ${chainId}`);
+    throw new Error(`Unsupported chain ID: ${chainId}. Available chains: ${Object.keys(rpcEndpoints).join(', ')}`);
   }
 
   const response = await fetch(rpcUrl, {
@@ -480,4 +484,128 @@ export function getAddressFromPrivateKey(privateKeyHex: string): string {
   const address = '0x' + bytesToHex(addressHash.slice(-20));
 
   return address;
+}
+
+/**
+ * EVM Transaction history item
+ */
+export interface EVMTransactionHistory {
+  txHash: string;
+  blockNumber: number;
+  timestamp: number | null;
+  type: 'send' | 'receive';
+  amount: string; // in wei or token units
+  from: string;
+  to: string;
+  tokenAddress: string | null; // null for native ETH
+  tokenSymbol: string | null;
+  status: 'confirmed';
+}
+
+// ERC20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+const TRANSFER_EVENT_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+/**
+ * Get ERC20 token transfer history for an address using eth_getLogs
+ * Note: Native ETH transfers cannot be tracked via standard RPC
+ */
+export async function getTransactionHistory(
+  address: string,
+  chainId: number,
+  options: {
+    fromBlock?: string;
+    toBlock?: string;
+    tokenAddresses?: string[]; // Filter by specific tokens
+  } = {}
+): Promise<EVMTransactionHistory[]> {
+  const { fromBlock = 'earliest', toBlock = 'latest', tokenAddresses } = options;
+
+  try {
+    const paddedAddress = '0x' + address.slice(2).toLowerCase().padStart(64, '0');
+    const transactions: EVMTransactionHistory[] = [];
+
+    // Get transfers TO this address (received)
+    const receivedLogs = await rpcCall(chainId, 'eth_getLogs', [{
+      fromBlock,
+      toBlock,
+      topics: [
+        TRANSFER_EVENT_TOPIC,
+        null, // from (any)
+        paddedAddress // to (this address)
+      ],
+      ...(tokenAddresses ? { address: tokenAddresses } : {})
+    }]);
+
+    for (const log of receivedLogs || []) {
+      const tx = parseTransferLog(log, address, 'receive');
+      if (tx) transactions.push(tx);
+    }
+
+    // Get transfers FROM this address (sent)
+    const sentLogs = await rpcCall(chainId, 'eth_getLogs', [{
+      fromBlock,
+      toBlock,
+      topics: [
+        TRANSFER_EVENT_TOPIC,
+        paddedAddress, // from (this address)
+        null // to (any)
+      ],
+      ...(tokenAddresses ? { address: tokenAddresses } : {})
+    }]);
+
+    for (const log of sentLogs || []) {
+      const tx = parseTransferLog(log, address, 'send');
+      if (tx) transactions.push(tx);
+    }
+
+    // Sort by block number descending
+    transactions.sort((a, b) => b.blockNumber - a.blockNumber);
+
+    return transactions;
+  } catch (err) {
+    console.error('Failed to get EVM transaction history:', err);
+    return [];
+  }
+}
+
+/**
+ * Parse a Transfer event log into a transaction history item
+ */
+function parseTransferLog(log: any, _walletAddress: string, type: 'send' | 'receive'): EVMTransactionHistory | null {
+  try {
+    const from = '0x' + log.topics[1].slice(26).toLowerCase();
+    const to = '0x' + log.topics[2].slice(26).toLowerCase();
+    const amount = BigInt(log.data).toString();
+
+    return {
+      txHash: log.transactionHash,
+      blockNumber: parseInt(log.blockNumber, 16),
+      timestamp: null, // Would need eth_getBlockByNumber to get timestamp
+      type,
+      amount,
+      from,
+      to,
+      tokenAddress: log.address,
+      tokenSymbol: null, // Would need token contract call to get symbol
+      status: 'confirmed'
+    };
+  } catch (err) {
+    console.error('Error parsing transfer log:', err);
+    return null;
+  }
+}
+
+/**
+ * Get block timestamp (for enriching transaction history)
+ */
+export async function getBlockTimestamp(chainId: number, blockNumber: number): Promise<number | null> {
+  try {
+    const block = await rpcCall(chainId, 'eth_getBlockByNumber', [
+      '0x' + blockNumber.toString(16),
+      false
+    ]);
+    return block?.timestamp ? parseInt(block.timestamp, 16) : null;
+  } catch {
+    return null;
+  }
 }

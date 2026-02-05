@@ -8,13 +8,13 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { hexToBytes } from '@noble/hashes/utils.js';
 
-// ZAN.top RPC endpoints for Solana
-const ZAN_API_KEY = '4a6373aaef354ba88416fbe73cd1c616';
+// RPC endpoints - must be set via setSolRpcEndpoints() from config
+let solRpcEndpoints: Record<string, string> = {};
 
-export const SOL_RPC_ENDPOINTS = {
-  mainnet: `https://api.zan.top/node/v1/solana/mainnet/${ZAN_API_KEY}`,
-  devnet: `https://api.zan.top/node/v1/solana/devnet/${ZAN_API_KEY}`,
-};
+// Set RPC endpoints from config
+export function setSolRpcEndpoints(endpoints: Record<string, string>): void {
+  solRpcEndpoints = { ...endpoints };
+}
 
 export type SolanaNetwork = 'mainnet' | 'devnet';
 
@@ -106,9 +106,9 @@ export function getAddressFromPrivateKey(privateKeyHex: string): string {
   return base58Encode(publicKey);
 }
 
-// RPC call to ZAN Solana node
+// RPC call to Solana node
 async function rpcCall(network: SolanaNetwork, method: string, params: any[]): Promise<any> {
-  const rpcUrl = SOL_RPC_ENDPOINTS[network];
+  const rpcUrl = solRpcEndpoints[network];
 
   const response = await fetch(rpcUrl, {
     method: 'POST',
@@ -196,6 +196,9 @@ function encodeCompactU16(value: number): Uint8Array {
 // System Program ID (11111111111111111111111111111111)
 const SYSTEM_PROGRAM_ID = new Uint8Array(32).fill(0);
 SYSTEM_PROGRAM_ID[0] = 0;
+
+// Token Program ID (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA)
+const TOKEN_PROGRAM_ID = base58Decode('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
 // Create transfer instruction data
 function createTransferInstructionData(lamports: number): Uint8Array {
@@ -335,6 +338,173 @@ export async function signAndSendTransaction(
   };
 }
 
+
+/**
+ * Get token account info
+ */
+async function getTokenAccountInfo(
+  walletAddress: string,
+  mintAddress: string,
+  network: SolanaNetwork
+): Promise<{ address: string; exists: boolean }> {
+  try {
+    const result = await rpcCall(network, 'getTokenAccountsByOwner', [
+      walletAddress,
+      { mint: mintAddress },
+      { encoding: 'jsonParsed' }
+    ]);
+
+    if (result.value && result.value.length > 0) {
+      return {
+        address: result.value[0].pubkey,
+        exists: true
+      };
+    }
+    return { address: '', exists: false };
+  } catch {
+    return { address: '', exists: false };
+  }
+}
+
+/**
+ * Create SPL token transfer instruction data
+ * Instruction index 3 = Transfer, takes amount as u64
+ */
+function createTokenTransferInstructionData(amount: bigint): Uint8Array {
+  const data = new Uint8Array(9);
+  data[0] = 3; // Transfer instruction
+  const view = new DataView(data.buffer);
+  view.setBigUint64(1, amount, true);
+  return data;
+}
+
+/**
+ * Sign and send an SPL token transfer
+ *
+ * @param toAddress Recipient wallet address (base58)
+ * @param amount Amount in token's smallest unit (e.g., for USDC with 6 decimals: 1 USDC = 1_000_000)
+ * @param mintAddress Token mint address (base58)
+ * @param privateKeyHex Private key (32 or 64 bytes as hex)
+ * @param decimals Token decimals (default 6 for USDC)
+ * @param network Network (mainnet or devnet)
+ */
+export async function signAndSendTokenTransfer(
+  toAddress: string,
+  amount: bigint,
+  mintAddress: string,
+  privateKeyHex: string,
+  _decimals: number = 6,
+  network: SolanaNetwork = 'mainnet'
+): Promise<{ signature: string; status: 'pending' }> {
+  const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
+  const privateKeyBytes = hexToBytes(cleanKey);
+
+  let signingKey: Uint8Array;
+  let publicKey: Uint8Array;
+
+  if (privateKeyBytes.length === 64) {
+    signingKey = privateKeyBytes.slice(0, 32);
+    publicKey = privateKeyBytes.slice(32);
+  } else if (privateKeyBytes.length === 32) {
+    signingKey = privateKeyBytes;
+    publicKey = ed25519.getPublicKey(signingKey);
+  } else {
+    throw new Error('Invalid private key length');
+  }
+
+  const fromWallet = base58Encode(publicKey);
+
+  // Get sender's token account
+  const senderTokenAccount = await getTokenAccountInfo(fromWallet, mintAddress, network);
+  if (!senderTokenAccount.exists) {
+    throw new Error('Sender has no token account for this token');
+  }
+
+  // Get recipient's token account
+  let recipientTokenAccount = await getTokenAccountInfo(toAddress, mintAddress, network);
+
+  // Get recent blockhash
+  const blockhash = await getRecentBlockhash(network);
+  const blockhashBytes = base58Decode(blockhash);
+
+  const senderATAPubkey = base58Decode(senderTokenAccount.address);
+
+  // If recipient doesn't have a token account, we need to create one
+  if (!recipientTokenAccount.exists) {
+    throw new Error('Recipient does not have a token account. They need to create one first or receive tokens from an exchange.');
+  }
+
+  const recipientATAPubkey = base58Decode(recipientTokenAccount.address);
+
+  // Build SPL Token transfer instruction
+  // Accounts: [source, destination, owner]
+  // Data: Transfer instruction (index 3) + amount (u64)
+
+  // Header: 1 signer (owner), 0 readonly signed, 1 readonly unsigned (token program)
+  const header = new Uint8Array([1, 0, 1]);
+
+  // Account keys: owner, source ATA, destination ATA, token program
+  const accountKeys = new Uint8Array(32 * 4);
+  accountKeys.set(publicKey, 0);        // 0: owner (signer, writable)
+  accountKeys.set(senderATAPubkey, 32); // 1: source ATA (writable)
+  accountKeys.set(recipientATAPubkey, 64); // 2: destination ATA (writable)
+  accountKeys.set(TOKEN_PROGRAM_ID, 96);   // 3: token program (readonly)
+
+  // Transfer instruction
+  const instructionData = createTokenTransferInstructionData(amount);
+
+  // Instruction format:
+  // - program_id_index: 3 (token program)
+  // - accounts: [1, 2, 0] (source, destination, owner)
+  // - data: transfer instruction
+  const accountIndices = new Uint8Array([1, 2, 0]); // source, dest, owner
+
+  const instruction = new Uint8Array(1 + 1 + accountIndices.length + 1 + instructionData.length);
+  let off = 0;
+  instruction[off++] = 3; // program_id_index (token program)
+  instruction[off++] = accountIndices.length;
+  instruction.set(accountIndices, off);
+  off += accountIndices.length;
+  instruction[off++] = instructionData.length;
+  instruction.set(instructionData, off);
+
+  // Build message
+  const numKeys = encodeCompactU16(4);
+  const numInstructions = encodeCompactU16(1);
+
+  const messageLength = header.length + numKeys.length + accountKeys.length + 32 + numInstructions.length + instruction.length;
+  const message = new Uint8Array(messageLength);
+  off = 0;
+  message.set(header, off); off += header.length;
+  message.set(numKeys, off); off += numKeys.length;
+  message.set(accountKeys, off); off += accountKeys.length;
+  message.set(blockhashBytes, off); off += 32;
+  message.set(numInstructions, off); off += numInstructions.length;
+  message.set(instruction, off);
+
+  // Sign message
+  const signature = ed25519.sign(message, signingKey);
+
+  // Build transaction
+  const numSignatures = encodeCompactU16(1);
+  const transaction = new Uint8Array(numSignatures.length + 64 + message.length);
+  off = 0;
+  transaction.set(numSignatures, off); off += numSignatures.length;
+  transaction.set(signature, off); off += 64;
+  transaction.set(message, off);
+
+  // Encode as base64
+  const rawTransaction = btoa(String.fromCharCode(...transaction));
+
+  // Send transaction
+  const txSignature = await sendTransaction(rawTransaction, network);
+
+  return {
+    signature: txSignature,
+    status: 'pending'
+  };
+}
+
 /**
  * Sign an arbitrary message
  */
@@ -355,4 +525,162 @@ export function signMessage(message: string, privateKeyHex: string): string {
   const signature = ed25519.sign(messageBytes, signingKey);
 
   return base58Encode(signature);
+}
+
+/**
+ * Transaction history item
+ */
+export interface SolanaTransactionHistory {
+  signature: string;
+  slot: number;
+  blockTime: number | null;
+  type: 'send' | 'receive' | 'unknown';
+  amount: number; // in lamports
+  from: string;
+  to: string;
+  fee: number;
+  status: 'confirmed' | 'failed';
+}
+
+/**
+ * Get transaction history for an address using Solana RPC
+ * Uses getSignaturesForAddress + getTransaction
+ */
+export async function getTransactionHistory(
+  address: string,
+  network: SolanaNetwork = 'mainnet',
+  limit: number = 20
+): Promise<SolanaTransactionHistory[]> {
+  try {
+    // Get recent transaction signatures for the address
+    const signatures = await rpcCall(network, 'getSignaturesForAddress', [
+      address,
+      { limit }
+    ]);
+
+    if (!signatures || signatures.length === 0) {
+      return [];
+    }
+
+    // Fetch transaction details for each signature
+    const transactions: SolanaTransactionHistory[] = [];
+
+    for (const sig of signatures) {
+      try {
+        const tx = await rpcCall(network, 'getTransaction', [
+          sig.signature,
+          { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }
+        ]);
+
+        if (!tx || !tx.meta) continue;
+
+        // Parse the transaction
+        const parsed = parseTransaction(tx, address);
+        if (parsed) {
+          transactions.push({
+            signature: sig.signature,
+            slot: sig.slot,
+            blockTime: sig.blockTime,
+            ...parsed,
+            status: tx.meta.err ? 'failed' : 'confirmed'
+          });
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch transaction ${sig.signature}:`, err);
+      }
+    }
+
+    return transactions;
+  } catch (err) {
+    console.error('Failed to get transaction history:', err);
+    return [];
+  }
+}
+
+/**
+ * Parse a Solana transaction to extract transfer details
+ */
+function parseTransaction(tx: any, walletAddress: string): {
+  type: 'send' | 'receive' | 'unknown';
+  amount: number;
+  from: string;
+  to: string;
+  fee: number;
+} | null {
+  try {
+    const fee = tx.meta?.fee || 0;
+    const accountKeys = tx.transaction?.message?.accountKeys || [];
+    const preBalances = tx.meta?.preBalances || [];
+    const postBalances = tx.meta?.postBalances || [];
+
+    // Find wallet's index in account keys
+    let walletIndex = -1;
+    for (let i = 0; i < accountKeys.length; i++) {
+      const key = typeof accountKeys[i] === 'string' ? accountKeys[i] : accountKeys[i]?.pubkey;
+      if (key === walletAddress) {
+        walletIndex = i;
+        break;
+      }
+    }
+
+    if (walletIndex === -1) {
+      return null;
+    }
+
+    // Calculate balance change for wallet
+    const balanceChange = (postBalances[walletIndex] || 0) - (preBalances[walletIndex] || 0);
+
+    // Determine transaction type and counterparty
+    if (balanceChange > 0) {
+      // Received funds
+      // Find sender (account with negative balance change, excluding fee payer for small amounts)
+      let senderAddress = 'unknown';
+      for (let i = 0; i < accountKeys.length; i++) {
+        if (i === walletIndex) continue;
+        const change = (postBalances[i] || 0) - (preBalances[i] || 0);
+        if (change < 0) {
+          senderAddress = typeof accountKeys[i] === 'string' ? accountKeys[i] : accountKeys[i]?.pubkey || 'unknown';
+          break;
+        }
+      }
+      return {
+        type: 'receive',
+        amount: balanceChange,
+        from: senderAddress,
+        to: walletAddress,
+        fee
+      };
+    } else if (balanceChange < 0) {
+      // Sent funds (balance change includes fee)
+      const amountSent = Math.abs(balanceChange) - fee;
+      // Find recipient (account with positive balance change)
+      let recipientAddress = 'unknown';
+      for (let i = 0; i < accountKeys.length; i++) {
+        if (i === walletIndex) continue;
+        const change = (postBalances[i] || 0) - (preBalances[i] || 0);
+        if (change > 0) {
+          recipientAddress = typeof accountKeys[i] === 'string' ? accountKeys[i] : accountKeys[i]?.pubkey || 'unknown';
+          break;
+        }
+      }
+      return {
+        type: 'send',
+        amount: amountSent > 0 ? amountSent : Math.abs(balanceChange),
+        from: walletAddress,
+        to: recipientAddress,
+        fee
+      };
+    }
+
+    return {
+      type: 'unknown',
+      amount: 0,
+      from: walletAddress,
+      to: walletAddress,
+      fee
+    };
+  } catch (err) {
+    console.error('Error parsing transaction:', err);
+    return null;
+  }
 }

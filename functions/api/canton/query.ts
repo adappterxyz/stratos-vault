@@ -20,6 +20,7 @@ interface Env {
 interface QueryRequest {
   templateId: string;
   filter?: Record<string, unknown>;
+  readAs?: string[];  // Additional parties to read as (e.g., public party)
 }
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
@@ -61,12 +62,30 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       authAudience: env.CANTON_AUTH_AUDIENCE
     });
 
-    // Query contracts
+    // Debug logging
+    console.log('Canton query request:', JSON.stringify({
+      host: env.CANTON_JSON_HOST,
+      port: env.CANTON_JSON_PORT,
+      authSecretLength: env.CANTON_AUTH_SECRET?.length || 0,
+      authUser: env.CANTON_AUTH_USER,
+      userPartyId: user.partyId,
+      templateId: body.templateId,
+      readAs: body.readAs,
+      filter: body.filter
+    }));
+
+    // Query contracts (include readAs parties for visibility)
     const contracts = await cantonClient.queryContracts(
       user.partyId,
       body.templateId,
-      body.filter
+      body.filter,
+      body.readAs
     );
+
+    console.log('Canton query result:', JSON.stringify({
+      count: contracts.length,
+      contracts: contracts.slice(0, 2)
+    }));
 
     return new Response(JSON.stringify({ success: true, data: contracts }), {
       headers: { 'Content-Type': 'application/json' }

@@ -1,5 +1,5 @@
 import { CantonJsonClient } from '../../_lib/canton-json-client';
-import { validateAdminToken } from '../../_lib/utils';
+import { validateAdminToken, validateSuperadminSession } from '../../_lib/utils';
 
 interface Env {
   DB: D1Database;
@@ -10,12 +10,27 @@ interface Env {
   CANTON_AUTH_AUDIENCE: string;
 }
 
+// Helper to validate either admin or superadmin token
+async function validateAuth(db: D1Database, request: Request): Promise<boolean> {
+  const adminToken = request.headers.get('X-Admin-Token');
+  if (adminToken && await validateAdminToken(db, adminToken)) {
+    return true;
+  }
+
+  const superadminToken = request.headers.get('X-Superadmin-Token');
+  if (superadminToken) {
+    const user = await validateSuperadminSession(db, superadminToken);
+    if (user) return true;
+  }
+
+  return false;
+}
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const { request, env } = context;
 
-  // Verify admin authentication
-  const adminToken = request.headers.get('X-Admin-Token');
-  if (!await validateAdminToken(env.DB, adminToken)) {
+  // Verify admin or superadmin authentication
+  if (!await validateAuth(env.DB, request)) {
     return new Response(JSON.stringify({ success: false, error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' }
@@ -23,13 +38,62 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   }
 
   try {
-    // Get content type to determine if this is form data or raw binary
+    // Get content type to determine if this is form data, JSON, or raw binary
     const contentType = request.headers.get('Content-Type') || '';
 
     let darBytes: ArrayBuffer;
     let darName: string;
 
-    if (contentType.includes('multipart/form-data')) {
+    if (contentType.includes('application/json')) {
+      // Handle URL-based installation
+      const body = await request.json() as { darUrl?: string };
+
+      if (!body.darUrl) {
+        return new Response(JSON.stringify({ success: false, error: 'No darUrl provided' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Validate URL format
+      let darEndpoint: string;
+      try {
+        const parsed = new URL(body.darUrl);
+        darEndpoint = parsed.href;
+      } catch {
+        return new Response(JSON.stringify({ success: false, error: 'Invalid URL format' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Fetch the DAR from the remote URL
+      console.log(`Fetching DAR from: ${darEndpoint}`);
+      const darResponse = await fetch(darEndpoint);
+
+      if (!darResponse.ok) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Failed to fetch DAR from ${darEndpoint}: ${darResponse.status} ${darResponse.statusText}`
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      darBytes = await darResponse.arrayBuffer();
+      // Try to get filename from Content-Disposition header, or derive from URL
+      const disposition = darResponse.headers.get('Content-Disposition');
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename="?([^";\s]+)"?/);
+        darName = match ? match[1] : 'remote.dar';
+      } else {
+        // Use URL path as the name
+        const parsed = new URL(body.darUrl);
+        const pathParts = parsed.pathname.split('/');
+        darName = pathParts[pathParts.length - 1] || 'remote.dar';
+      }
+    } else if (contentType.includes('multipart/form-data')) {
       // Handle form data upload
       const formData = await request.formData();
       const file = formData.get('dar') as File | null;
@@ -95,9 +159,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const { request, env } = context;
 
-  // Verify admin authentication
-  const adminToken = request.headers.get('X-Admin-Token');
-  if (!await validateAdminToken(env.DB, adminToken)) {
+  // Verify admin or superadmin authentication
+  if (!await validateAuth(env.DB, request)) {
     return new Response(JSON.stringify({ success: false, error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' }

@@ -1,0 +1,31 @@
+# Cloudflare Wallet - Wrangler Configuration Template
+# Copy this file to wrangler.toml and fill in your values
+
+name = "cloudflare-wallet"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "YOUR_DATABASE_NAME"
+database_id = "YOUR_DATABASE_ID"
+
+[vars]
+# Canton Network Configuration
+SPLICE_HOST = "YOUR_SPLICE_HOST"           # e.g., "p1.cantondefi.com"
+SPLICE_PORT = 443
+CANTON_JSON_HOST = "YOUR_CANTON_JSON_HOST" # e.g., "p1-json.cantondefi.com"
+CANTON_JSON_PORT = 443
+CANTON_AUTH_SECRET = "YOUR_AUTH_SECRET"    # Keep this secret!
+CANTON_AUTH_USER = "ledger-api-user"
+SPLICE_ADMIN_USER = "app-user"
+CANTON_AUTH_AUDIENCE = "https://canton.network.global"
+
+# WebAuthn Configuration (REQUIRED)
+RP_ID = "YOUR_DOMAIN"                      # e.g., "wallet.example.com"
+RP_NAME = "Your Wallet Name"               # Display name for WebAuthn
+
+# UI Configuration
+THEME = "purple"                           # "purple" or "teal"
+ORG_NAME = "Your Organization"             # Displayed in the UI

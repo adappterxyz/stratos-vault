@@ -9,13 +9,13 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
-// ZAN.top RPC endpoints for TON
-const ZAN_API_KEY = '4a6373aaef354ba88416fbe73cd1c616';
+// RPC endpoints - must be set via setTonRpcEndpoints() from config
+let tonRpcEndpoints: Record<string, string> = {};
 
-export const TON_RPC_ENDPOINTS = {
-  mainnet: `https://api.zan.top/node/v1/ton/mainnet/${ZAN_API_KEY}`,
-  testnet: `https://api.zan.top/node/v1/ton/testnet/${ZAN_API_KEY}`,
-};
+// Set RPC endpoints from config
+export function setTonRpcEndpoints(endpoints: Record<string, string>): void {
+  tonRpcEndpoints = { ...endpoints };
+}
 
 export type TonNetwork = 'mainnet' | 'testnet';
 
@@ -167,7 +167,7 @@ export function toRawAddress(address: string): string {
 
 // API call to TON node (HTTP API format)
 async function apiCall(network: TonNetwork, endpoint: string, params?: Record<string, any>): Promise<any> {
-  const baseUrl = TON_RPC_ENDPOINTS[network];
+  const baseUrl = tonRpcEndpoints[network];
 
   const url = new URL(`${baseUrl}${endpoint}`);
   if (params) {
@@ -190,7 +190,7 @@ async function apiCall(network: TonNetwork, endpoint: string, params?: Record<st
 
 // JSON-RPC call to TON node (kept for future use)
 async function _rpcCall(network: TonNetwork, method: string, params: any): Promise<any> {
-  const baseUrl = TON_RPC_ENDPOINTS[network];
+  const baseUrl = tonRpcEndpoints[network];
 
   const response = await fetch(baseUrl, {
     method: 'POST',
@@ -249,7 +249,7 @@ export async function getSeqno(address: string, network: TonNetwork = 'mainnet')
 
 // Send BOC (Bag of Cells)
 export async function sendBoc(boc: string, network: TonNetwork = 'mainnet'): Promise<any> {
-  const baseUrl = TON_RPC_ENDPOINTS[network];
+  const baseUrl = tonRpcEndpoints[network];
 
   const response = await fetch(`${baseUrl}/sendBoc`, {
     method: 'POST',
@@ -487,4 +487,107 @@ export function signMessage(message: string, privateKeyHex: string): string {
   const signature = ed25519.sign(messageBytes, signingKey);
 
   return bytesToHex(signature);
+}
+
+/**
+ * TON Transaction history item
+ */
+export interface TonTransactionHistory {
+  hash: string;
+  lt: string; // Logical time
+  timestamp: number;
+  type: 'send' | 'receive';
+  amount: bigint; // in nanotons
+  from: string;
+  to: string;
+  message: string | null;
+  fee: bigint;
+  status: 'confirmed';
+}
+
+/**
+ * Get transaction history for a TON address
+ * Uses TON HTTP API getTransactions endpoint
+ */
+export async function getTransactionHistory(
+  address: string,
+  network: TonNetwork = 'mainnet',
+  limit: number = 20
+): Promise<TonTransactionHistory[]> {
+  try {
+    const result = await apiCall(network, '/getTransactions', {
+      address,
+      limit
+    });
+
+    if (!result.ok || !result.result) {
+      return [];
+    }
+
+    const transactions: TonTransactionHistory[] = [];
+
+    for (const tx of result.result) {
+      const parsed = parseTransaction(tx, address);
+      if (parsed) {
+        transactions.push(parsed);
+      }
+    }
+
+    return transactions;
+  } catch (err) {
+    console.error('Failed to get TON transaction history:', err);
+    return [];
+  }
+}
+
+/**
+ * Parse a TON transaction
+ */
+function parseTransaction(tx: any, walletAddress: string): TonTransactionHistory | null {
+  try {
+    const inMsg = tx.in_msg;
+    const outMsgs = tx.out_msgs || [];
+
+    // Determine if this is incoming or outgoing
+    let type: 'send' | 'receive';
+    let amount: bigint;
+    let from: string;
+    let to: string;
+    let message: string | null = null;
+
+    if (outMsgs.length > 0) {
+      // Outgoing transaction
+      type = 'send';
+      const outMsg = outMsgs[0];
+      amount = BigInt(outMsg.value || '0');
+      from = walletAddress;
+      to = outMsg.destination?.account_address || outMsg.destination || 'unknown';
+      message = outMsg.message || null;
+    } else if (inMsg && inMsg.source) {
+      // Incoming transaction
+      type = 'receive';
+      amount = BigInt(inMsg.value || '0');
+      from = inMsg.source?.account_address || inMsg.source || 'unknown';
+      to = walletAddress;
+      message = inMsg.message || null;
+    } else {
+      return null;
+    }
+
+    return {
+      hash: tx.transaction_id?.hash || tx.hash || '',
+      lt: tx.transaction_id?.lt || tx.lt || '0',
+      timestamp: tx.utime || 0,
+      type,
+      amount,
+      from,
+      to,
+      message,
+      fee: BigInt(tx.fee || '0'),
+      status: 'confirmed'
+    };
+  } catch (err) {
+    console.error('Error parsing TON transaction:', err);
+    return null;
+  }
 }

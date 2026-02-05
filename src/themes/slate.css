@@ -1,0 +1,22 @@
+/*
+ * Slate/Dark Theme
+ */
+.theme-slate {
+  --primary: #64748b;
+  --primary-light: #94a3b8;
+  --primary-dark: #475569;
+  --secondary: #78716c;
+  --gradient-start: #64748b;
+  --gradient-end: #78716c;
+  --bg-gradient-start: #0f172a;
+  --bg-gradient-end: #1e293b;
+  --accent-bg: rgba(100, 116, 139, 0.1);
+  --accent-bg-hover: rgba(100, 116, 139, 0.2);
+  --accent-border: rgba(100, 116, 139, 0.2);
+  --accent-border-hover: rgba(100, 116, 139, 0.3);
+  --sidebar-bg-start: rgba(15, 23, 42, 0.98);
+  --sidebar-bg-end: rgba(30, 41, 59, 0.98);
+  --sidebar-toggle-bg: rgba(100, 116, 139, 0.15);
+  --sidebar-toggle-border: rgba(100, 116, 139, 0.3);
+  --sidebar-toggle-hover: rgba(100, 116, 139, 0.25);
+}

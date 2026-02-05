@@ -10,13 +10,13 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
-// ZAN.top RPC endpoints for TRON
-const ZAN_API_KEY = '4a6373aaef354ba88416fbe73cd1c616';
+// RPC endpoints - must be set via setTronRpcEndpoints() from config
+let tronRpcEndpoints: Record<string, string> = {};
 
-export const TRON_RPC_ENDPOINTS = {
-  mainnet: `https://api.zan.top/node/v1/tron/mainnet/${ZAN_API_KEY}`,
-  shasta: `https://api.zan.top/node/v1/tron/shasta/${ZAN_API_KEY}`, // testnet
-};
+// Set RPC endpoints from config
+export function setTronRpcEndpoints(endpoints: Record<string, string>): void {
+  tronRpcEndpoints = { ...endpoints };
+}
 
 export type TronNetwork = 'mainnet' | 'shasta';
 
@@ -154,7 +154,7 @@ export function hexToAddress(hex: string): string {
 
 // API call to TRON node
 async function apiCall(network: TronNetwork, endpoint: string, body?: any): Promise<any> {
-  const baseUrl = TRON_RPC_ENDPOINTS[network];
+  const baseUrl = tronRpcEndpoints[network];
 
   const response = await fetch(`${baseUrl}${endpoint}`, {
     method: body ? 'POST' : 'GET',
@@ -386,4 +386,143 @@ export async function transferTRC20(
     txID,
     status: result.result ? 'pending' : 'failed'
   };
+}
+
+/**
+ * Tron Transaction history item
+ */
+export interface TronTransactionHistory {
+  txID: string;
+  blockNumber: number | null;
+  blockTimestamp: number | null;
+  type: 'send' | 'receive';
+  amount: number; // in SUN (1 TRX = 1e6 SUN)
+  from: string;
+  to: string;
+  contractAddress: string | null; // For TRC20 transfers
+  status: 'confirmed' | 'failed';
+}
+
+// TronGrid API endpoints for transaction history
+const TRONGRID_API: Record<TronNetwork, string> = {
+  mainnet: 'https://api.trongrid.io',
+  shasta: 'https://api.shasta.trongrid.io'
+};
+
+/**
+ * Get transaction history for a Tron address
+ * Uses TronGrid API
+ */
+export async function getTransactionHistory(
+  address: string,
+  network: TronNetwork = 'mainnet',
+  limit: number = 20
+): Promise<TronTransactionHistory[]> {
+  try {
+    const apiBase = TRONGRID_API[network];
+
+    // Get TRX transfers
+    const trxResponse = await fetch(
+      `${apiBase}/v1/accounts/${address}/transactions?limit=${limit}&only_confirmed=true`
+    );
+
+    const transactions: TronTransactionHistory[] = [];
+
+    if (trxResponse.ok) {
+      const trxData = await trxResponse.json() as { data?: any[] };
+      for (const tx of trxData.data || []) {
+        const parsed = parseTransaction(tx, address);
+        if (parsed) transactions.push(parsed);
+      }
+    }
+
+    // Get TRC20 transfers
+    const trc20Response = await fetch(
+      `${apiBase}/v1/accounts/${address}/transactions/trc20?limit=${limit}&only_confirmed=true`
+    );
+
+    if (trc20Response.ok) {
+      const trc20Data = await trc20Response.json() as { data?: any[] };
+      for (const tx of trc20Data.data || []) {
+        const parsed = parseTRC20Transaction(tx, address);
+        if (parsed) transactions.push(parsed);
+      }
+    }
+
+    // Sort by timestamp descending
+    transactions.sort((a, b) => (b.blockTimestamp || 0) - (a.blockTimestamp || 0));
+
+    return transactions.slice(0, limit);
+  } catch (err) {
+    console.error('Failed to get Tron transaction history:', err);
+    return [];
+  }
+}
+
+/**
+ * Parse a TRX transaction
+ */
+function parseTransaction(tx: any, walletAddress: string): TronTransactionHistory | null {
+  try {
+    const rawData = tx.raw_data?.contract?.[0];
+    if (!rawData || rawData.type !== 'TransferContract') return null;
+
+    const value = rawData.parameter?.value || {};
+    const from = hexToBase58(value.owner_address || '');
+    const to = hexToBase58(value.to_address || '');
+    const amount = value.amount || 0;
+
+    return {
+      txID: tx.txID,
+      blockNumber: tx.blockNumber || null,
+      blockTimestamp: tx.block_timestamp || null,
+      type: from.toLowerCase() === walletAddress.toLowerCase() ? 'send' : 'receive',
+      amount,
+      from,
+      to,
+      contractAddress: null,
+      status: tx.ret?.[0]?.contractRet === 'SUCCESS' ? 'confirmed' : 'failed'
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Parse a TRC20 transaction
+ */
+function parseTRC20Transaction(tx: any, walletAddress: string): TronTransactionHistory | null {
+  try {
+    return {
+      txID: tx.transaction_id,
+      blockNumber: tx.block_timestamp ? null : null,
+      blockTimestamp: tx.block_timestamp || null,
+      type: tx.from?.toLowerCase() === walletAddress.toLowerCase() ? 'send' : 'receive',
+      amount: parseInt(tx.value || '0'),
+      from: tx.from || '',
+      to: tx.to || '',
+      contractAddress: tx.token_info?.address || null,
+      status: 'confirmed'
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Convert hex address to base58 (for display)
+ */
+function hexToBase58(hexAddr: string): string {
+  if (!hexAddr || hexAddr.startsWith('T')) return hexAddr;
+  try {
+    const bytes = hexToBytes(hexAddr.startsWith('0x') ? hexAddr.slice(2) : hexAddr);
+    // Base58Check encoding
+    const checksum = sha256(sha256(bytes)).slice(0, 4);
+    const addressBytes = new Uint8Array(bytes.length + 4);
+    addressBytes.set(bytes);
+    addressBytes.set(checksum, bytes.length);
+    return base58Encode(addressBytes);
+  } catch {
+    return hexAddr;
+  }
 }

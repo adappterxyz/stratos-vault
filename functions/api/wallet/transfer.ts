@@ -1,4 +1,4 @@
-import { getSpliceClientForUser, jsonResponse, errorResponse, handleCors, requireAuth, Env } from '../../_lib/utils';
+import { getSpliceClientForUser, jsonResponse, errorResponse, handleCors, requireAuth, recordTransaction, Env } from '../../_lib/utils';
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
   const corsResponse = handleCors(context.request);
@@ -27,6 +27,30 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     console.log('Offer result:', JSON.stringify(offerResult, null, 2));
     const contractId = offerResult.offer_contract_id || offerResult.contract_id || offerResult.contractId;
     console.log(`Transfer offer created with contract ID: ${contractId}`);
+
+    // Record the send transaction as pending
+    try {
+      await recordTransaction(context.env.DB, {
+        userId: user.id,
+        txHash: contractId,
+        txType: 'send',
+        status: 'pending',
+        assetSymbol: 'CC',
+        chain: 'Canton',
+        chainType: 'canton',
+        amount: amount.toString(),
+        fromAddress: user.partyId || user.username,
+        toAddress: to,
+        description: 'Transfer from Canton Wallet',
+        metadata: {
+          contractId,
+          trackingId: offerResult.tracking_id
+        }
+      });
+    } catch (txError) {
+      console.error('Failed to record transaction:', txError);
+      // Don't fail the transfer if recording fails
+    }
 
     return jsonResponse({
       success: true,

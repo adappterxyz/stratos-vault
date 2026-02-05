@@ -3,6 +3,8 @@ import { jsonResponse, errorResponse, handleCors, requireAdmin, generateId, Env 
 interface CodeInput {
   maxUses: number;
   expiresAt?: string;
+  codeType?: 'general' | 'reserved_username';
+  reservedUsername?: string;
 }
 
 // Generate a random registration code
@@ -42,7 +44,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       expiresAt: row.expires_at,
       createdAt: row.created_at,
       isExpired: row.expires_at ? new Date(row.expires_at) < new Date() : false,
-      isDepleted: row.uses_remaining <= 0
+      isDepleted: row.uses_remaining <= 0,
+      codeType: row.code_type || 'general',
+      reservedUsername: row.reserved_username || null
     }));
 
     return jsonResponse({
@@ -70,6 +74,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return errorResponse('maxUses must be at least 1', 400);
     }
 
+    const codeType = body.codeType || 'general';
+    if (codeType === 'reserved_username' && !body.reservedUsername) {
+      return errorResponse('Username is required for reserved username codes', 400);
+    }
+
     const id = generateId();
     const code = generateCode();
 
@@ -87,15 +96,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     await context.env.DB.prepare(
-      `INSERT INTO registration_codes (id, code, max_uses, uses_remaining, created_by, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO registration_codes (id, code, max_uses, uses_remaining, created_by, expires_at, code_type, reserved_username)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       id,
       code,
       body.maxUses,
       body.maxUses,
       createdBy,
-      body.expiresAt || null
+      body.expiresAt || null,
+      codeType,
+      codeType === 'reserved_username' ? body.reservedUsername!.trim() : null
     ).run();
 
     return jsonResponse({
@@ -105,7 +116,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         code,
         maxUses: body.maxUses,
         usesRemaining: body.maxUses,
-        expiresAt: body.expiresAt || null
+        expiresAt: body.expiresAt || null,
+        codeType,
+        reservedUsername: codeType === 'reserved_username' ? body.reservedUsername!.trim() : null
       }
     });
   } catch (error: any) {
