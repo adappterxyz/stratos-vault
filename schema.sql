@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS apps (
   icon TEXT NOT NULL,             -- Icon character or emoji
   color TEXT DEFAULT '#6366f1',   -- Background color (hex)
   url TEXT,                       -- App URL (null for built-in apps)
+  zoom INTEGER DEFAULT 100,       -- Zoom percentage for iframe content (10-200)
   sort_order INTEGER DEFAULT 0,   -- Display order
   is_enabled INTEGER DEFAULT 1,   -- Can disable without deleting
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

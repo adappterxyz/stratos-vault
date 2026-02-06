@@ -264,7 +264,7 @@ function App() {
   const [appPackageStatus, setAppPackageStatus] = useState<Record<string, { status: string; message?: string }>>({});
 
   // Dock apps configuration - loaded from API
-  const [dockApps, setDockApps] = useState<Array<{ id: string; name: string; icon: string; color: string; url: string | null }>>([]);
+  const [dockApps, setDockApps] = useState<Array<{ id: string; name: string; icon: string; color: string; url: string | null; zoom?: number }>>([]);
   const [allowedIframeOrigins, setAllowedIframeOrigins] = useState<string[]>([]);
 
   // Wallet Bridge for iframe communication
@@ -295,6 +295,24 @@ function App() {
     } catch {}
     return null;
   });
+  const [appZoom, setAppZoom] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.appZoom || {};
+      }
+    } catch {}
+    return {};
+  });
+  const [zoomTooltipApp, setZoomTooltipApp] = useState<string | null>(null);
+  const zoomTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [snapLayoutVisible, setSnapLayoutVisible] = useState(false);
+  const [snapLayoutHovered, setSnapLayoutHovered] = useState<number | null>(null);
+  const [snapLayoutPosition, setSnapLayoutPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const snapLayoutHoveredRef = useRef<number | null>(null);
+  const floatingAppsRef = useRef(floatingApps);
+  floatingAppsRef.current = floatingApps;
   const appDragRef = useRef<{ appId: string; startX: number; startY: number; startPosX: number; startPosY: number; active: boolean } | null>(null);
   const appResizeRef = useRef<{ appId: string; startX: number; startY: number; startW: number; startH: number; active: boolean } | null>(null);
 
@@ -303,6 +321,8 @@ function App() {
   // A 4px dead-zone prevents accidental drags on simple clicks.
   const rafRef = useRef<number>(0);
   const DRAG_THRESHOLD = 4;
+
+  const SNAP_EDGE_THRESHOLD = 50; // pixels from edge to trigger snap layout
 
   const handleAppPointerMove = useCallback((e: MouseEvent | TouchEvent) => {
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
@@ -318,8 +338,10 @@ function App() {
         document.body.style.userSelect = 'none';
       }
       e.preventDefault();
-      const newX = clientX - drag.startX + drag.startPosX;
-      const newY = clientY - drag.startY + drag.startPosY;
+      let newX = clientX - drag.startX + drag.startPosX;
+      let newY = clientY - drag.startY + drag.startPosY;
+      // Prevent dragging header off-screen (keep at least 40px of header visible at top)
+      newY = Math.max(0, newY);
       cancelAnimationFrame(rafRef.current);
       rafRef.current = requestAnimationFrame(() => {
         const el = document.querySelector(`[data-floating-app="${drag.appId}"]`) as HTMLElement | null;
@@ -328,6 +350,31 @@ function App() {
           el.style.top = `${newY}px`;
         }
       });
+
+      // Detect edge proximity for snap layout picker (left or right edge only)
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const nearLeft = clientX < SNAP_EDGE_THRESHOLD;
+      const nearRight = clientX > vw - SNAP_EDGE_THRESHOLD;
+
+      if (nearLeft || nearRight) {
+        setSnapLayoutVisible(true);
+        // Position picker on the opposite side from cursor
+        const pickerX = nearLeft ? 80 : vw - 200;
+        setSnapLayoutPosition({ x: pickerX, y: Math.min(vh - 150, Math.max(50, clientY - 50)) });
+
+        // Auto-select layout based on vertical position
+        const floatingCount = Object.values(floatingAppsRef.current).filter(s => s.floating).length;
+        const layoutCount = floatingCount === 1 ? 2 : floatingCount === 2 ? 2 : floatingCount === 3 ? 3 : 2;
+        const zoneHeight = vh / layoutCount;
+        const layoutIndex = Math.min(layoutCount - 1, Math.floor(clientY / zoneHeight));
+        setSnapLayoutHovered(layoutIndex);
+        snapLayoutHoveredRef.current = layoutIndex;
+      } else {
+        setSnapLayoutVisible(false);
+        setSnapLayoutHovered(null);
+        snapLayoutHoveredRef.current = null;
+      }
     }
     if (appResizeRef.current) {
       const resize = appResizeRef.current;
@@ -355,7 +402,115 @@ function App() {
     // Commit final position from DOM to React state only if drag/resize was activated
     const drag = appDragRef.current;
     const resize = appResizeRef.current;
-    if (drag?.active) {
+    const pendingLayout = snapLayoutHoveredRef.current;
+
+    // Re-enable iframe pointer events first
+    document.querySelectorAll('.app-iframe').forEach(f => (f as HTMLElement).style.pointerEvents = '');
+    document.body.style.userSelect = '';
+
+    if (drag?.active && pendingLayout !== null) {
+      // Apply layout to all floating windows
+      const currentFloating = floatingAppsRef.current;
+      const floatingAppIds = Object.entries(currentFloating)
+        .filter(([_, state]) => state.floating)
+        .map(([id]) => id);
+
+      const count = floatingAppIds.length;
+      if (count > 0) {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const gap = 3;
+
+        const getPositions = (): Array<{ x: number; y: number; width: number; height: number }> => {
+          if (count === 1) {
+            if (pendingLayout === 0) {
+              return [{ x: vw * 0.1, y: vh * 0.1, width: vw * 0.8, height: vh * 0.8 }];
+            }
+            return [{ x: gap, y: gap, width: vw - gap * 2, height: vh - gap * 2 }];
+          }
+          if (count === 2) {
+            if (pendingLayout === 0) {
+              const w = (vw - gap * 3) / 2;
+              return [
+                { x: gap, y: gap, width: w, height: vh - gap * 2 },
+                { x: gap * 2 + w, y: gap, width: w, height: vh - gap * 2 },
+              ];
+            }
+            const h = (vh - gap * 3) / 2;
+            return [
+              { x: gap, y: gap, width: vw - gap * 2, height: h },
+              { x: gap, y: gap * 2 + h, width: vw - gap * 2, height: h },
+            ];
+          }
+          if (count === 3) {
+            const w = (vw - gap * 3) / 2;
+            const h = (vh - gap * 3) / 2;
+            if (pendingLayout === 0) {
+              return [
+                { x: gap, y: gap, width: w, height: vh - gap * 2 },
+                { x: gap * 2 + w, y: gap, width: w, height: h },
+                { x: gap * 2 + w, y: gap * 2 + h, width: w, height: h },
+              ];
+            }
+            if (pendingLayout === 1) {
+              return [
+                { x: gap, y: gap, width: w, height: h },
+                { x: gap, y: gap * 2 + h, width: w, height: h },
+                { x: gap * 2 + w, y: gap, width: w, height: vh - gap * 2 },
+              ];
+            }
+            const w3 = (vw - gap * 4) / 3;
+            return [
+              { x: gap, y: gap, width: w3, height: vh - gap * 2 },
+              { x: gap * 2 + w3, y: gap, width: w3, height: vh - gap * 2 },
+              { x: gap * 3 + w3 * 2, y: gap, width: w3, height: vh - gap * 2 },
+            ];
+          }
+          if (pendingLayout === 0) {
+            const cols = 2;
+            const rows = Math.ceil(count / cols);
+            const w = (vw - gap * (cols + 1)) / cols;
+            const h = (vh - gap * (rows + 1)) / rows;
+            return floatingAppIds.map((_, i) => ({
+              x: gap + (i % cols) * (w + gap),
+              y: gap + Math.floor(i / cols) * (h + gap),
+              width: w,
+              height: h,
+            }));
+          }
+          const w = (vw - gap * (count + 1)) / count;
+          return floatingAppIds.map((_, i) => ({
+            x: gap + i * (w + gap),
+            y: gap,
+            width: w,
+            height: vh - gap * 2,
+          }));
+        };
+
+        const positions = getPositions();
+        floatingAppIds.forEach((id, i) => {
+          if (positions[i]) {
+            const el = document.querySelector(`[data-floating-app="${id}"]`) as HTMLElement | null;
+            if (el) {
+              el.style.left = `${positions[i].x}px`;
+              el.style.top = `${positions[i].y}px`;
+              el.style.width = `${positions[i].width}px`;
+              el.style.height = `${positions[i].height}px`;
+            }
+          }
+        });
+
+        setFloatingApps(prev => {
+          const updated = { ...prev };
+          floatingAppIds.forEach((id, i) => {
+            if (positions[i]) {
+              updated[id] = { ...updated[id], ...positions[i] };
+            }
+          });
+          return updated;
+        });
+      }
+    } else if (drag?.active) {
       const el = document.querySelector(`[data-floating-app="${drag.appId}"]`) as HTMLElement | null;
       if (el) {
         setFloatingApps(prev => ({
@@ -364,6 +519,7 @@ function App() {
         }));
       }
     }
+
     if (resize?.active) {
       const el = document.querySelector(`[data-floating-app="${resize.appId}"]`) as HTMLElement | null;
       if (el) {
@@ -373,11 +529,12 @@ function App() {
         }));
       }
     }
+
     appDragRef.current = null;
     appResizeRef.current = null;
-    // Re-enable iframe pointer events
-    document.querySelectorAll('.app-iframe').forEach(f => (f as HTMLElement).style.pointerEvents = '');
-    document.body.style.userSelect = '';
+    setSnapLayoutVisible(false);
+    setSnapLayoutHovered(null);
+    snapLayoutHoveredRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -402,9 +559,10 @@ function App() {
         openAppSessions: Array.from(openAppSessions),
         floatingApps,
         focusedApp,
+        appZoom,
       }));
     } catch {}
-  }, [openAppSessions, floatingApps, focusedApp]);
+  }, [openAppSessions, floatingApps, focusedApp, appZoom]);
 
   const startAppDrag = (appId: string, e: React.MouseEvent | React.TouchEvent) => {
     const state = floatingApps[appId];
@@ -551,6 +709,7 @@ function App() {
     icon: string;
     color: string;
     url: string | null;
+    zoom: number;
     sort_order: number;
     is_enabled: number;
     created_at: string;
@@ -673,7 +832,7 @@ function App() {
       const data = await res.json() as ApiResponse<{
         theme: string;
         orgName: string;
-        dockApps: Array<{ id: string; name: string; icon: string; color: string; url: string | null }>;
+        dockApps: Array<{ id: string; name: string; icon: string; color: string; url: string | null; zoom?: number }>;
         allowedIframeOrigins: string[];
         rpcEndpoints?: {
           evm?: Record<string, string>;
@@ -4405,8 +4564,13 @@ function App() {
                     <div className="loading-msg">Loading RPC endpoints...</div>
                   ) : rpcEndpoints.length === 0 ? (
                     <div className="empty-msg">No RPC endpoints configured. Click "Add RPC" to add one.</div>
-                  ) : (
+                  ) : (() => {
+                    const filteredEndpoints = rpcEndpoints.filter(ep => ep.network === rpcNetworkMode);
+                    return (
                     <div className="rpc-table-container">
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+                        Showing {filteredEndpoints.length} {rpcNetworkMode} endpoint{filteredEndpoints.length !== 1 ? 's' : ''}
+                      </p>
                       <table className="admin-table">
                         <thead>
                           <tr>
@@ -4420,9 +4584,7 @@ function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {rpcEndpoints
-                            .filter(ep => ep.network === rpcNetworkMode)
-                            .map(ep => (
+                          {filteredEndpoints.map(ep => (
                               <tr key={ep.id} className={ep.is_enabled === 0 ? 'disabled-row' : ''}>
                                 <td>
                                   <span className="chain-badge" title={ep.chain_type.toUpperCase()}>{ep.chain_name || ep.chain_type.toUpperCase()}</span>
@@ -4469,7 +4631,8 @@ function App() {
                         </tbody>
                       </table>
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               </section>
             )}
@@ -5425,6 +5588,7 @@ function App() {
         <Wallet
           authUser={authUser}
           orgName={orgName}
+          logo={customLogo}
           assets={assets.map(a => ({ ...a, icon: a.icon || null }))}
           transactions={transactions}
           transferOffers={transferOffers.map(o => ({
@@ -5923,6 +6087,13 @@ function App() {
         </div>
       )}
 
+      {/* Empty workspace hint */}
+      {openAppSessions.size === 0 && activeApp === null && (
+        <div className="workspace-empty-hint">
+          Hover over dock to start apps
+        </div>
+      )}
+
       {/* macOS-style Dock */}
       <div
         className="dock-trigger"
@@ -5987,7 +6158,7 @@ function App() {
             className={`app-window ${shouldShow ? 'visible' : 'hidden'} ${isFloating ? 'floating' : ''}`}
             style={shouldShow ? (isFloating
               ? { display: 'flex', left: floatState.x, top: floatState.y, width: floatState.width, height: floatState.height, zIndex: focusedApp === appId ? 910 : 901 }
-              : { display: 'flex' }
+              : { display: 'flex', zIndex: 950 }
             ) : { display: 'none' }}
             onMouseDown={() => { if (isFloating) setFocusedApp(appId); }}
           >
@@ -5996,10 +6167,43 @@ function App() {
               onMouseDown={(e) => { if (isFloating) startAppDrag(appId, e); }}
               onTouchStart={(e) => { if (isFloating) startAppDrag(appId, e); }}
             >
-              <div className="app-window-title">
+              <div
+                className="app-window-title"
+                onWheel={app.url ? (e) => {
+                  e.preventDefault();
+                  const delta = e.deltaY > 0 ? -5 : 5;
+                  setAppZoom(prev => {
+                    const current = prev[appId] || 100;
+                    const next = Math.min(200, Math.max(25, current + delta));
+                    return { ...prev, [appId]: next };
+                  });
+                  setZoomTooltipApp(appId);
+                  if (zoomTooltipTimerRef.current) clearTimeout(zoomTooltipTimerRef.current);
+                  zoomTooltipTimerRef.current = setTimeout(() => setZoomTooltipApp(null), 800);
+                } : undefined}
+              >
                 <span className="app-window-icon">{app.icon}</span> {app.name}
+                {zoomTooltipApp === appId && (
+                  <span className="app-zoom-tooltip">{appZoom[appId] || 100}%</span>
+                )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
+                {appUrl && (
+                  <button
+                    className="app-window-float-toggle"
+                    onClick={() => {
+                      const iframe = iframeRefs.current.get(appId);
+                      if (iframe && iframe.src) {
+                        const src = iframe.src;
+                        iframe.src = '';
+                        setTimeout(() => { iframe.src = src; }, 50);
+                      }
+                    }}
+                    title="Refresh"
+                  >
+<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1.5 6a4.5 4.5 0 014.5-4.5A4.5 4.5 0 0110 3.5l.5.5"/><path d="M10.5 1.5v2.5H8"/><path d="M10.5 6a4.5 4.5 0 01-4.5 4.5A4.5 4.5 0 012 8.5l-.5-.5"/><path d="M1.5 10.5V8H4"/></svg>
+                  </button>
+                )}
                 <button
                   className="app-window-float-toggle"
                   onClick={() => toggleAppFloating(appId)}
@@ -6044,6 +6248,12 @@ function App() {
                   className="app-iframe"
                   title={app.name}
                   sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  style={appZoom[appId] && appZoom[appId] !== 100 ? {
+                    transform: `scale(${appZoom[appId] / 100})`,
+                    transformOrigin: 'top left',
+                    width: `${10000 / appZoom[appId]}%`,
+                    height: `${10000 / appZoom[appId]}%`,
+                  } : undefined}
                 />
               ) : (
                 /* Otherwise show placeholder UI */
@@ -6164,6 +6374,41 @@ function App() {
           </button>
         </form>
       </div>
+
+      {/* Snap Layout Picker */}
+      {snapLayoutVisible && (() => {
+        const floatingCount = Object.values(floatingApps).filter(s => s.floating).length;
+        const layouts = floatingCount === 1 ? [
+          { icon: '⬜', label: 'Center' },
+          { icon: '⬛', label: 'Maximize' },
+        ] : floatingCount === 2 ? [
+          { icon: '◧', label: 'Side by Side' },
+          { icon: '⬒', label: 'Stacked' },
+        ] : floatingCount === 3 ? [
+          { icon: '⬕', label: '1 + 2 Right' },
+          { icon: '⬔', label: '2 Left + 1' },
+          { icon: '☰', label: '3 Columns' },
+        ] : [
+          { icon: '⊞', label: 'Grid' },
+          { icon: '☰', label: 'Columns' },
+        ];
+        return (
+          <div className="snap-layout-picker" style={{ left: snapLayoutPosition.x, top: snapLayoutPosition.y }}>
+            <div className="snap-layout-options">
+              {layouts.map((layout, i) => (
+                <div
+                  key={i}
+                  className={`snap-layout-option ${snapLayoutHovered === i ? 'hovered' : ''}`}
+                >
+                  <span className="snap-layout-icon">{layout.icon}</span>
+                  <span className="snap-layout-label">{layout.label}</span>
+                </div>
+              ))}
+            </div>
+            <div className="snap-layout-hint">Move up/down to select, release to apply</div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

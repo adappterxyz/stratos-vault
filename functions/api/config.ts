@@ -6,6 +6,7 @@ interface DockApp {
   icon: string;
   color: string;
   url: string | null;
+  zoom: number;
 }
 
 interface ConfigOverride {
@@ -32,10 +33,16 @@ interface AppRow {
   is_enabled: number;
 }
 
+// Map database "testnet" network to chain-specific testnet names used by signers
+const TESTNET_NETWORK_NAMES: Record<string, string> = {
+  svm: 'devnet',    // Solana uses 'devnet'
+  tron: 'shasta',   // Tron uses 'shasta'
+};
+
 // Build RPC endpoints object from database records
 // Returns format expected by signers:
 // - EVM: keyed by chain_id (e.g., { "1": "url", "8453": "url" })
-// - Others: keyed by network (e.g., { "mainnet": "url", "testnet": "url" })
+// - Others: keyed by network (e.g., { "mainnet": "url", "devnet": "url" })
 function buildRpcEndpoints(endpoints: RpcEndpoint[]): Record<string, Record<string, string>> {
   const result: Record<string, Record<string, string>> = {};
 
@@ -48,6 +55,9 @@ function buildRpcEndpoints(endpoints: RpcEndpoint[]): Record<string, Record<stri
     let key: string;
     if (ep.chain_type === 'evm' && ep.chain_id) {
       key = ep.chain_id;
+    } else if (ep.network === 'testnet' && TESTNET_NETWORK_NAMES[ep.chain_type]) {
+      // Map generic "testnet" to chain-specific name (e.g., "devnet", "shasta")
+      key = TESTNET_NETWORK_NAMES[ep.chain_type];
     } else {
       key = ep.network;
     }
@@ -167,7 +177,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         name: app.name,
         icon: app.icon,
         color: app.color,
-        url: app.url
+        url: app.url,
+        zoom: (app as any).zoom ?? 100
       }));
 
       // Extract allowed iframe origins from app URLs

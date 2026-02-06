@@ -68,6 +68,7 @@ interface AuthUser {
 interface WalletProps {
   authUser: AuthUser;
   orgName: string;
+  logo?: string | null;
   assets: Asset[];
   transactions: Transaction[];
   transactionPagination: TransactionPagination | null;
@@ -89,6 +90,7 @@ interface WalletProps {
 export default function Wallet({
   authUser,
   orgName,
+  logo,
   assets,
   transactions,
   transactionPagination,
@@ -158,8 +160,11 @@ export default function Wallet({
             {/* Header row */}
             <div className="wallet-header">
               <div className="wallet-title">
-                <span className="wallet-name">{orgName}</span>
-                <span className="wallet-user">@{authUser.username}</span>
+                <img src={logo || '/logo.png'} alt="" className="wallet-logo" />
+                <div className="wallet-title-text">
+                  <span className="wallet-name">{orgName}</span>
+                  <span className="wallet-user">@{authUser.username}</span>
+                </div>
               </div>
               <div className="wallet-actions">
                 <button onClick={onSettings} className="btn-icon btn-settings" title="Settings">

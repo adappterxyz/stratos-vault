@@ -6,6 +6,7 @@ interface AppRow {
   icon: string;
   color: string;
   url: string | null;
+  zoom: number;
   sort_order: number;
   is_enabled: number;
   created_at: string;
@@ -52,6 +53,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       icon: string;
       color?: string;
       url?: string;
+      zoom?: number;
       sort_order?: number;
       is_enabled?: boolean;
     };
@@ -77,13 +79,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     const id = body.id || crypto.randomUUID();
     const color = body.color || '#6366f1';
+    const zoom = Math.min(200, Math.max(10, body.zoom ?? 100));
     const sortOrder = body.sort_order ?? 0;
     const isEnabled = body.is_enabled !== false ? 1 : 0;
 
     await context.env.DB.prepare(
-      `INSERT INTO apps (id, name, icon, color, url, sort_order, is_enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, body.name, body.icon, color, body.url || null, sortOrder, isEnabled).run();
+      `INSERT INTO apps (id, name, icon, color, url, zoom, sort_order, is_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, body.name, body.icon, color, body.url || null, zoom, sortOrder, isEnabled).run();
 
     // Fetch the created app
     const created = await context.env.DB.prepare(
@@ -125,6 +128,7 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
       icon?: string;
       color?: string;
       url?: string | null;
+      zoom?: number;
       sort_order?: number;
       is_enabled?: boolean;
     };
@@ -174,6 +178,11 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
     if (body.url !== undefined) {
       updates.push('url = ?');
       values.push(body.url);
+    }
+
+    if (body.zoom !== undefined) {
+      updates.push('zoom = ?');
+      values.push(Math.min(200, Math.max(10, body.zoom)));
     }
 
     if (body.sort_order !== undefined) {
