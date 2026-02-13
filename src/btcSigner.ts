@@ -293,6 +293,7 @@ export async function signTransaction(
   const publicKey = secp256k1.getPublicKey(privateKeyBytes, true);
   const senderAddress = getAddressFromPublicKey(publicKey, network);
 
+  try {
   // Calculate total input value
   const totalInput = utxos.reduce((sum, utxo) => sum + utxo.value, 0);
   const change = totalInput - amount - fee;
@@ -494,6 +495,9 @@ export async function signTransaction(
     rawTransaction: rawTxHex,
     txid
   };
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**

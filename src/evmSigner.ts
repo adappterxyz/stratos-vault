@@ -253,6 +253,7 @@ export async function signTransaction(
   const cleanPrivateKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanPrivateKey);
 
+  try {
   // Get nonce if not provided
   let nonce = tx.nonce;
   if (nonce === undefined) {
@@ -391,6 +392,9 @@ export async function signTransaction(
     rawTransaction,
     transactionHash
   };
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**
@@ -417,18 +421,22 @@ export function signMessage(message: string, privateKeyHex: string): string {
   const cleanPrivateKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanPrivateKey);
 
-  // Ethereum signed message prefix
-  const prefix = '\x19Ethereum Signed Message:\n' + message.length;
-  const prefixedMessage = new TextEncoder().encode(prefix + message);
-  const messageHash = keccak_256(prefixedMessage);
+  try {
+    // Ethereum signed message prefix
+    const prefix = '\x19Ethereum Signed Message:\n' + message.length;
+    const prefixedMessage = new TextEncoder().encode(prefix + message);
+    const messageHash = keccak_256(prefixedMessage);
 
-  // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
-  const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, format: 'recovered' });
-  const r = bytesToHex(signatureBytes.slice(0, 32));
-  const s = bytesToHex(signatureBytes.slice(32, 64));
-  const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
+    // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
+    const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, format: 'recovered' });
+    const r = bytesToHex(signatureBytes.slice(0, 32));
+    const s = bytesToHex(signatureBytes.slice(32, 64));
+    const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
 
-  return '0x' + r + s + v;
+    return '0x' + r + s + v;
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**
@@ -446,27 +454,31 @@ export function signTypedData(
   const cleanPrivateKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanPrivateKey);
 
-  // EIP-712 hash calculation (simplified - full implementation needs type encoding)
-  // This is a placeholder - proper EIP-712 requires encoding each type
-  const domainSeparator = keccak_256(new TextEncoder().encode(JSON.stringify(typedData.domain)));
-  const structHash = keccak_256(new TextEncoder().encode(JSON.stringify(typedData.message)));
+  try {
+    // EIP-712 hash calculation (simplified - full implementation needs type encoding)
+    // This is a placeholder - proper EIP-712 requires encoding each type
+    const domainSeparator = keccak_256(new TextEncoder().encode(JSON.stringify(typedData.domain)));
+    const structHash = keccak_256(new TextEncoder().encode(JSON.stringify(typedData.message)));
 
-  // Combine: \x19\x01 + domainSeparator + structHash
-  const combined = new Uint8Array(2 + 32 + 32);
-  combined[0] = 0x19;
-  combined[1] = 0x01;
-  combined.set(domainSeparator, 2);
-  combined.set(structHash, 34);
+    // Combine: \x19\x01 + domainSeparator + structHash
+    const combined = new Uint8Array(2 + 32 + 32);
+    combined[0] = 0x19;
+    combined[1] = 0x01;
+    combined.set(domainSeparator, 2);
+    combined.set(structHash, 34);
 
-  const messageHash = keccak_256(combined);
+    const messageHash = keccak_256(combined);
 
-  // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
-  const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, format: 'recovered' });
-  const r = bytesToHex(signatureBytes.slice(0, 32));
-  const s = bytesToHex(signatureBytes.slice(32, 64));
-  const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
+    // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
+    const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, format: 'recovered' });
+    const r = bytesToHex(signatureBytes.slice(0, 32));
+    const s = bytesToHex(signatureBytes.slice(32, 64));
+    const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
 
-  return '0x' + r + s + v;
+    return '0x' + r + s + v;
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**
@@ -476,14 +488,18 @@ export function getAddressFromPrivateKey(privateKeyHex: string): string {
   const cleanPrivateKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanPrivateKey);
 
-  const publicKey = secp256k1.getPublicKey(privateKeyBytes, false);
-  // Remove the 0x04 prefix (uncompressed key marker)
-  const publicKeyWithoutPrefix = publicKey.slice(1);
+  try {
+    const publicKey = secp256k1.getPublicKey(privateKeyBytes, false);
+    // Remove the 0x04 prefix (uncompressed key marker)
+    const publicKeyWithoutPrefix = publicKey.slice(1);
 
-  const addressHash = keccak_256(publicKeyWithoutPrefix);
-  const address = '0x' + bytesToHex(addressHash.slice(-20));
+    const addressHash = keccak_256(publicKeyWithoutPrefix);
+    const address = '0x' + bytesToHex(addressHash.slice(-20));
 
-  return address;
+    return address;
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**

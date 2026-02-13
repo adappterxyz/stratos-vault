@@ -243,6 +243,9 @@ async function generateWallet(
   // Encrypt private key with PRF-derived key
   const privateKeyEncrypted = await encryptAESGCM(encryptionKey, privateKeyHex);
 
+  // Zero out private key bytes
+  privateKeyBytes.fill(0);
+
   return {
     chainType,
     address,
@@ -302,4 +305,14 @@ export function getPrfOutput(credential: any): ArrayBuffer | null {
 export function isPrfSupported(): boolean {
   // PRF requires WebAuthn Level 3
   return 'PublicKeyCredential' in window;
+}
+
+// Zero out a Uint8Array to remove sensitive data from memory
+export function zeroBytes(arr: Uint8Array): void {
+  arr.fill(0);
+}
+
+// Zero out an ArrayBuffer to remove sensitive data from memory
+export function zeroBuffer(buf: ArrayBuffer): void {
+  new Uint8Array(buf).fill(0);
 }

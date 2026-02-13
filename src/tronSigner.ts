@@ -91,7 +91,12 @@ function hash256(data: Uint8Array): Uint8Array {
 // Get public key from private key
 export function getPublicKey(privateKeyHex: string): Uint8Array {
   const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
-  return secp256k1.getPublicKey(hexToBytes(cleanKey), false); // Uncompressed
+  const keyBytes = hexToBytes(cleanKey);
+  try {
+    return secp256k1.getPublicKey(keyBytes, false); // Uncompressed
+  } finally {
+    keyBytes.fill(0);
+  }
 }
 
 // Get TRON address from public key
@@ -256,36 +261,40 @@ export async function signTransaction(
   const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanKey);
 
-  const fromAddress = getAddressFromPrivateKey(privateKeyHex);
+  try {
+    const fromAddress = getAddressFromPrivateKey(privateKeyHex);
 
-  // Create unsigned transaction via API
-  const unsignedTx = await createTransaction(fromAddress, toAddress, amount, network);
+    // Create unsigned transaction via API
+    const unsignedTx = await createTransaction(fromAddress, toAddress, amount, network);
 
-  if (!unsignedTx.txID) {
-    throw new Error('Failed to create transaction');
+    if (!unsignedTx.txID) {
+      throw new Error('Failed to create transaction');
+    }
+
+    // Sign the transaction ID with recovered format (65 bytes: r(32) + s(32) + recovery(1))
+    const txIdBytes = hexToBytes(unsignedTx.txID);
+    const signatureBytes = secp256k1.sign(txIdBytes, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
+
+    // Format signature (r + s + v)
+    const r = bytesToHex(signatureBytes.slice(0, 32));
+    const s = bytesToHex(signatureBytes.slice(32, 64));
+    const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
+    const signature = r + s + v;
+
+    // Add signature to transaction
+    const signedTx = {
+      ...unsignedTx,
+      signature: [signature]
+    };
+
+    return {
+      rawTransaction: JSON.stringify(signedTx),
+      txID: unsignedTx.txID,
+      signature
+    };
+  } finally {
+    privateKeyBytes.fill(0);
   }
-
-  // Sign the transaction ID with recovered format (65 bytes: r(32) + s(32) + recovery(1))
-  const txIdBytes = hexToBytes(unsignedTx.txID);
-  const signatureBytes = secp256k1.sign(txIdBytes, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
-
-  // Format signature (r + s + v)
-  const r = bytesToHex(signatureBytes.slice(0, 32));
-  const s = bytesToHex(signatureBytes.slice(32, 64));
-  const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
-  const signature = r + s + v;
-
-  // Add signature to transaction
-  const signedTx = {
-    ...unsignedTx,
-    signature: [signature]
-  };
-
-  return {
-    rawTransaction: JSON.stringify(signedTx),
-    txID: unsignedTx.txID,
-    signature
-  };
 }
 
 /**
@@ -315,19 +324,23 @@ export function signMessage(message: string, privateKeyHex: string): string {
   const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanKey);
 
-  // TRON message signing format: "\x19TRON Signed Message:\n" + message.length + message
-  const prefix = '\x19TRON Signed Message:\n' + message.length;
-  const prefixedMessage = new TextEncoder().encode(prefix + message);
-  const messageHash = keccak_256(prefixedMessage);
+  try {
+    // TRON message signing format: "\x19TRON Signed Message:\n" + message.length + message
+    const prefix = '\x19TRON Signed Message:\n' + message.length;
+    const prefixedMessage = new TextEncoder().encode(prefix + message);
+    const messageHash = keccak_256(prefixedMessage);
 
-  // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
-  const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
+    // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
+    const signatureBytes = secp256k1.sign(messageHash, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
 
-  const r = bytesToHex(signatureBytes.slice(0, 32));
-  const s = bytesToHex(signatureBytes.slice(32, 64));
-  const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
+    const r = bytesToHex(signatureBytes.slice(0, 32));
+    const s = bytesToHex(signatureBytes.slice(32, 64));
+    const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
 
-  return '0x' + r + s + v;
+    return '0x' + r + s + v;
+  } finally {
+    privateKeyBytes.fill(0);
+  }
 }
 
 /**
@@ -342,50 +355,55 @@ export async function transferTRC20(
 ): Promise<{ txID: string; status: 'pending' | 'failed' }> {
   const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanKey);
-  const fromAddress = getAddressFromPrivateKey(privateKeyHex);
 
-  // Encode transfer function call
-  // transfer(address,uint256) = keccak256("transfer(address,uint256)").slice(0, 4) = a9059cbb
-  const toHex = addressToHex(toAddress).slice(2); // Remove 41 prefix, pad to 64 chars
-  const amountHex = amount.toString(16).padStart(64, '0');
-  const parameter = toHex.padStart(64, '0') + amountHex;
+  try {
+    const fromAddress = getAddressFromPrivateKey(privateKeyHex);
 
-  // Create trigger smart contract transaction
-  const unsignedTx = await apiCall(network, '/wallet/triggersmartcontract', {
-    owner_address: addressToHex(fromAddress),
-    contract_address: addressToHex(contractAddress),
-    function_selector: 'transfer(address,uint256)',
-    parameter,
-    fee_limit: 100000000, // 100 TRX
-    call_value: 0,
-    visible: false
-  });
+    // Encode transfer function call
+    // transfer(address,uint256) = keccak256("transfer(address,uint256)").slice(0, 4) = a9059cbb
+    const toHex = addressToHex(toAddress).slice(2); // Remove 41 prefix, pad to 64 chars
+    const amountHex = amount.toString(16).padStart(64, '0');
+    const parameter = toHex.padStart(64, '0') + amountHex;
 
-  if (!unsignedTx.transaction || !unsignedTx.transaction.txID) {
-    throw new Error(unsignedTx.result?.message || 'Failed to create TRC20 transfer');
+    // Create trigger smart contract transaction
+    const unsignedTx = await apiCall(network, '/wallet/triggersmartcontract', {
+      owner_address: addressToHex(fromAddress),
+      contract_address: addressToHex(contractAddress),
+      function_selector: 'transfer(address,uint256)',
+      parameter,
+      fee_limit: 100000000, // 100 TRX
+      call_value: 0,
+      visible: false
+    });
+
+    if (!unsignedTx.transaction || !unsignedTx.transaction.txID) {
+      throw new Error(unsignedTx.result?.message || 'Failed to create TRC20 transfer');
+    }
+
+    const txID = unsignedTx.transaction.txID;
+    const txIdBytes = hexToBytes(txID);
+    // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
+    const signatureBytes = secp256k1.sign(txIdBytes, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
+
+    const r = bytesToHex(signatureBytes.slice(0, 32));
+    const s = bytesToHex(signatureBytes.slice(32, 64));
+    const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
+    const signature = r + s + v;
+
+    const signedTx = {
+      ...unsignedTx.transaction,
+      signature: [signature]
+    };
+
+    const result = await broadcastTransaction(signedTx, network);
+
+    return {
+      txID,
+      status: result.result ? 'pending' : 'failed'
+    };
+  } finally {
+    privateKeyBytes.fill(0);
   }
-
-  const txID = unsignedTx.transaction.txID;
-  const txIdBytes = hexToBytes(txID);
-  // Sign with recovered format (65 bytes: r(32) + s(32) + recovery(1))
-  const signatureBytes = secp256k1.sign(txIdBytes, privateKeyBytes, { prehash: false, lowS: true, format: 'recovered' });
-
-  const r = bytesToHex(signatureBytes.slice(0, 32));
-  const s = bytesToHex(signatureBytes.slice(32, 64));
-  const v = (signatureBytes[64] + 27).toString(16).padStart(2, '0');
-  const signature = r + s + v;
-
-  const signedTx = {
-    ...unsignedTx.transaction,
-    signature: [signature]
-  };
-
-  const result = await broadcastTransaction(signedTx, network);
-
-  return {
-    txID,
-    status: result.result ? 'pending' : 'failed'
-  };
 }
 
 /**

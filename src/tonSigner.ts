@@ -82,13 +82,17 @@ export function getPublicKey(privateKeyHex: string): Uint8Array {
   const cleanKey = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
   const privateKeyBytes = hexToBytes(cleanKey);
 
-  if (privateKeyBytes.length === 64) {
-    // Already includes public key
-    return privateKeyBytes.slice(32);
-  } else if (privateKeyBytes.length === 32) {
-    return ed25519.getPublicKey(privateKeyBytes);
+  try {
+    if (privateKeyBytes.length === 64) {
+      // Already includes public key
+      return privateKeyBytes.slice(32);
+    } else if (privateKeyBytes.length === 32) {
+      return ed25519.getPublicKey(privateKeyBytes);
+    }
+    throw new Error('Invalid private key length');
+  } finally {
+    privateKeyBytes.fill(0);
   }
-  throw new Error('Invalid private key length');
 }
 
 // Get TON address from public key (user-friendly format)
@@ -383,6 +387,7 @@ export async function signTransaction(
     throw new Error('Invalid private key length');
   }
 
+  try {
   const fromAddress = getAddressFromPrivateKey(privateKeyHex);
 
   // Get seqno
@@ -446,6 +451,10 @@ export async function signTransaction(
     boc,
     hash
   };
+  } finally {
+    privateKeyBytes.fill(0);
+    signingKey.fill(0);
+  }
 }
 
 /**
@@ -483,10 +492,15 @@ export function signMessage(message: string, privateKeyHex: string): string {
     throw new Error('Invalid private key length');
   }
 
-  const messageBytes = new TextEncoder().encode(message);
-  const signature = ed25519.sign(messageBytes, signingKey);
+  try {
+    const messageBytes = new TextEncoder().encode(message);
+    const signature = ed25519.sign(messageBytes, signingKey);
 
-  return bytesToHex(signature);
+    return bytesToHex(signature);
+  } finally {
+    privateKeyBytes.fill(0);
+    signingKey.fill(0);
+  }
 }
 
 /**

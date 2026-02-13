@@ -245,6 +245,8 @@ export async function signTransaction(
     throw new Error('Invalid private key length');
   }
 
+  try {
+
   const fromPubkey = publicKey;
   const toPubkey = base58Decode(toAddress);
 
@@ -318,6 +320,10 @@ export async function signTransaction(
     rawTransaction,
     signature: base58Encode(signature)
   };
+  } finally {
+    privateKeyBytes.fill(0);
+    signingKey.fill(0);
+  }
 }
 
 /**
@@ -521,10 +527,15 @@ export function signMessage(message: string, privateKeyHex: string): string {
     throw new Error('Invalid private key length');
   }
 
-  const messageBytes = new TextEncoder().encode(message);
-  const signature = ed25519.sign(messageBytes, signingKey);
+  try {
+    const messageBytes = new TextEncoder().encode(message);
+    const signature = ed25519.sign(messageBytes, signingKey);
 
-  return base58Encode(signature);
+    return base58Encode(signature);
+  } finally {
+    privateKeyBytes.fill(0);
+    signingKey.fill(0);
+  }
 }
 
 /**
