@@ -1,16 +1,14 @@
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import { jsonResponse, errorResponse, handleCors, generateId, Env, getCantonJsonClient, getSpliceAdminClient } from '../../../_lib/utils';
-import { generateWalletAddresses, storeWalletAddresses } from '../../../_lib/wallet-generator';
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
   const corsResponse = handleCors(context.request);
   if (corsResponse) return corsResponse;
 
   try {
-    const { userId, response, prfEnabled, walletAddresses } = await context.request.json() as {
+    const { userId, response, walletAddresses } = await context.request.json() as {
       userId: string;
       response: any;
-      prfEnabled?: boolean;
       walletAddresses?: Array<{
         chainType: string;
         address: string;
@@ -118,12 +116,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ).bind(useLogId, registrationCodeId, userId).run();
     }
 
-    // Handle wallet addresses
-    // If client provided PRF-encrypted wallets, store those
-    // Otherwise, fall back to server-side generation (for non-PRF authenticators)
+    // Store client-generated wallet addresses (PRF-encrypted)
+    // PRF is required - wallets are always encrypted client-side
     if (walletAddresses && walletAddresses.length > 0) {
-      // Store client-generated wallet addresses (PRF-encrypted)
-      console.log(`Storing ${walletAddresses.length} client-generated wallet addresses for user: ${userId}`);
+      console.log(`Storing ${walletAddresses.length} PRF-encrypted wallet addresses for user: ${userId}`);
       for (const wallet of walletAddresses) {
         const walletId = generateId();
         await context.env.DB.prepare(
@@ -136,19 +132,6 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           wallet.address,
           wallet.privateKeyEncrypted
         ).run();
-      }
-    } else if (!prfEnabled) {
-      // PRF not enabled - generate server-side (legacy/fallback)
-      // Note: These can be decrypted by the server
-      try {
-        console.log(`PRF not available, generating server-side wallet addresses for user: ${userId}`);
-        const encryptionKey = context.env.CANTON_AUTH_SECRET || 'default-encryption-key';
-        const serverWallets = await generateWalletAddresses(encryptionKey);
-        await storeWalletAddresses(context.env.DB, userId, serverWallets);
-        console.log(`Generated ${serverWallets.length} server-side wallet addresses for user: ${userId}`);
-      } catch (walletError) {
-        console.error('Failed to generate wallet addresses:', walletError);
-        // Don't fail registration if wallet generation fails
       }
     } else {
       // PRF enabled but no wallets provided - they'll be generated on first login

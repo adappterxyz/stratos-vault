@@ -1042,7 +1042,7 @@ function App() {
         }
         throw new Error(data.error || 'Create failed');
       },
-      onCantonExercise: async (params: { contractId: string; templateId: string; choice: string; argument: Record<string, unknown> }) => {
+      onCantonExercise: async (params: { contractId: string; templateId: string; choice: string; argument: Record<string, unknown>; actAs?: string[] }) => {
         const response = await fetch(`${API_BASE}/api/canton/exercise`, {
           method: 'POST',
           headers: {
@@ -1856,19 +1856,15 @@ function App() {
 
       const response = credential.response as AuthenticatorAttestationResponse;
 
-      // Check for PRF support
+      // Require PRF support - reject authenticators without it
       const clientExtResults = credential.getClientExtensionResults() as any;
       const prfEnabled = clientExtResults?.prf?.enabled;
-      let walletAddresses: WalletData[] = [];
 
-      if (prfEnabled) {
-        // PRF is supported - we need to do a second operation to get PRF output
-        // For registration, we just note that PRF is enabled
-        // Wallets will be generated on first login when we can get PRF output
-        console.log('PRF extension enabled for this credential');
-      } else {
-        console.warn('PRF not supported by authenticator - wallets will be generated server-side');
+      if (!prfEnabled) {
+        throw new Error('Your authenticator does not support PRF (Pseudorandom Function). PRF is required for secure client-side key encryption. Please use a compatible passkey (e.g., YubiKey 5.5+, or a platform authenticator with PRF support).');
       }
+
+      console.log('PRF extension enabled for this credential');
 
       // Format credential for verification
       const credentialJSON = {
@@ -1881,7 +1877,7 @@ function App() {
           transports: response.getTransports?.() || []
         },
         clientExtensionResults: {
-          prf: prfEnabled ? { enabled: true } : undefined
+          prf: { enabled: true }
         }
       };
 
@@ -1892,8 +1888,7 @@ function App() {
         body: JSON.stringify({
           userId: optionsData.data.userId,
           response: credentialJSON,
-          prfEnabled,
-          walletAddresses: walletAddresses.length > 0 ? walletAddresses : undefined
+          walletAddresses: undefined
         })
       });
       const verifyData = await verifyRes.json() as ApiResponse<{ sessionId: string; user: AuthUser }>;
@@ -2918,19 +2913,28 @@ function App() {
     }
   };
 
+  // Reset package status for an app so it can be re-checked and reinstalled
+  const resetAppPackageStatus = (appId: string) => {
+    setAppPackageStatus(prev => {
+      const next = { ...prev };
+      delete next[appId];
+      return next;
+    });
+  };
+
   // Check and install package for a docked app if needed
-  const checkAndInstallAppPackage = async (appId: string, appUrl: string): Promise<boolean> => {
+  const checkAndInstallAppPackage = async (appId: string, appUrl: string, force: boolean = false): Promise<boolean> => {
     if (!hasAdminAuth) {
       // Non-admin users can't install packages, just proceed
       return true;
     }
 
-    // Skip if already checking or ready
+    // Skip if already checking
     const currentStatus = appPackageStatus[appId];
     if (currentStatus?.status === 'checking' || currentStatus?.status === 'installing') {
       return false; // Still in progress
     }
-    if (currentStatus?.status === 'ready') {
+    if (currentStatus?.status === 'ready' && !force) {
       return true; // Already verified
     }
 
@@ -2964,7 +2968,7 @@ function App() {
       });
       const packagesData = await packagesRes.json() as ApiResponse<{ packageIds: string[] }>;
 
-      if (packagesData.success && packagesData.data?.packageIds?.includes(packageInfo.packageId)) {
+      if (!force && packagesData.success && packagesData.data?.packageIds?.includes(packageInfo.packageId)) {
         // Package already installed
         setAppPackageStatus(prev => ({ ...prev, [appId]: { status: 'ready' } }));
         return true;
@@ -4899,19 +4903,34 @@ function App() {
                                       pkgStatus?.status === 'na' ? (
                                         <span className="status-na" title={pkgStatus.message}>N/A</span>
                                       ) : (
-                                        <button
-                                          onClick={() => checkAndInstallAppPackage(app.id, app.url!)}
-                                          className={`btn-install ${pkgStatus?.status === 'ready' ? 'success' : ''} ${pkgStatus?.status === 'not_installed' ? 'warning' : ''}`}
-                                          title={pkgStatus?.status === 'ready' ? 'Package installed' : 'Install DAR Package'}
-                                          disabled={pkgStatus?.status === 'checking' || pkgStatus?.status === 'installing' || pkgStatus?.status === 'ready'}
-                                        >
-                                          {pkgStatus?.status === 'checking' ? 'Checking...' :
-                                           pkgStatus?.status === 'installing' ? 'Installing...' :
-                                           pkgStatus?.status === 'ready' ? 'Installed' :
-                                           pkgStatus?.status === 'not_installed' ? 'Install DAR' :
-                                           pkgStatus?.status === 'error' ? 'Retry' :
-                                           'Check'}
-                                        </button>
+                                        <>
+                                          <button
+                                            onClick={() => checkAndInstallAppPackage(app.id, app.url!)}
+                                            className={`btn-install ${pkgStatus?.status === 'ready' ? 'success' : ''} ${pkgStatus?.status === 'not_installed' ? 'warning' : ''}`}
+                                            title={pkgStatus?.status === 'ready' ? 'Package installed - click to re-check' : 'Install DAR Package'}
+                                            disabled={pkgStatus?.status === 'checking' || pkgStatus?.status === 'installing'}
+                                          >
+                                            {pkgStatus?.status === 'checking' ? 'Checking...' :
+                                             pkgStatus?.status === 'installing' ? 'Installing...' :
+                                             pkgStatus?.status === 'ready' ? 'Installed' :
+                                             pkgStatus?.status === 'not_installed' ? 'Install DAR' :
+                                             pkgStatus?.status === 'error' ? 'Retry' :
+                                             'Check'}
+                                          </button>
+                                          {pkgStatus?.status === 'ready' && (
+                                            <button
+                                              onClick={() => {
+                                                resetAppPackageStatus(app.id);
+                                                checkAndInstallAppPackage(app.id, app.url!, true);
+                                              }}
+                                              className="btn-install warning"
+                                              title="Force reinstall DAR package"
+                                              style={{ marginLeft: '4px' }}
+                                            >
+                                              Reinstall
+                                            </button>
+                                          )}
+                                        </>
                                       )
                                     )}
                                     <button

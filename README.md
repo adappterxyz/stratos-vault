@@ -37,7 +37,7 @@ The Stratos Vault wallet operates as an embedded child frame within authorized S
 For evaluation purposes:
 1. Access the live demo at https://n1.cantondefi.com
 2. Request a registration code from the Stratos team
-3. Register using a WebAuthn-compatible device (YubiKey, TouchID, FaceID)
+3. Register using a WebAuthn-compatible device with PRF support (YubiKey 5.5+, TouchID, FaceID)
 4. The wallet will generate encrypted multi-chain addresses
 5. Vault policies and rebalancing can be configured via the admin interface
 
@@ -71,7 +71,7 @@ stratos-vault/
 │   │   ├── utils.ts          # Helper functions, CORS, ID generation
 │   │   ├── splice-client.ts  # Splice API client
 │   │   ├── canton-json-client.ts  # Canton JSON API client
-│   │   └── wallet-generator.ts    # Server-side wallet generation (fallback)
+│   │   └── wallet-generator.ts    # Wallet address storage utilities
 │   └── api/
 │       ├── auth/             # Authentication endpoints
 │       │   └── passkey/      # WebAuthn passkey endpoints
