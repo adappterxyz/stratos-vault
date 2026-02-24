@@ -25,6 +25,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   if (corsResponse) return corsResponse;
 
   try {
+    // Get network from query parameter (default: mainnet)
+    const url = new URL(context.request.url);
+    const network = url.searchParams.get('network') === 'testnet' ? 'testnet' : 'mainnet';
+
     // Get base assets
     const assetsResult = await context.env.DB.prepare(
       `SELECT id, symbol, name, icon, chain, chain_type, contract_address, decimals, is_native, sort_order
@@ -33,14 +37,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
        ORDER BY sort_order ASC, symbol ASC`
     ).all();
 
-    // Get all asset chain mappings
+    // Get asset chain mappings filtered by network
     const chainsResult = await context.env.DB.prepare(
       `SELECT ac.asset_id, ac.chain, ac.chain_type, ac.contract_address, ac.decimals
        FROM asset_chains ac
        JOIN assets a ON ac.asset_id = a.id
-       WHERE ac.is_enabled = 1 AND a.is_enabled = 1
+       WHERE ac.is_enabled = 1 AND a.is_enabled = 1 AND ac.network = ?
        ORDER BY ac.chain`
-    ).all();
+    ).bind(network).all();
 
     // Group chains by asset_id
     const chainsByAsset: Record<string, AssetChain[]> = {};

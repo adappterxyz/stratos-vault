@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { base64URLStringToBuffer, bufferToBase64URLString } from '@simplewebauthn/browser';
 import { Html5Qrcode } from 'html5-qrcode';
-import { generateWalletsForChains, WalletData, decryptPrivateKey } from './crypto';
+import { generateWalletsForChains, generateAllMpcWallets, WalletData, decryptPrivateKey, deriveEncryptionKey, encryptAESGCM } from './crypto';
 import { WalletBridge } from './walletBridge';
+import { MpcClient } from './mpc/mpc-client';
+import type { SigningContext } from './mpc/types';
 import * as evmSigner from './evmSigner';
 import * as btcSigner from './btcSigner';
 import * as solSigner from './solSigner';
@@ -16,7 +18,8 @@ import {
   Globe,
   LayoutGrid,
   Settings,
-  LogOut
+  LogOut,
+  X
 } from 'lucide-react';
 import './themes/index.css';
 import './App.css';
@@ -181,6 +184,27 @@ const snap = (value: number, grid: number) => grid <= 1 ? value : Math.round(val
 // LocalStorage key for app window state persistence
 const STORAGE_KEY = 'wallet-app-window-state';
 
+// Component to render app favicon from its URL with emoji fallback
+function AppFavicon({ url, icon, name, size }: { url: string | null; icon: string; name: string; size?: number }) {
+  const [tryIndex, setTryIndex] = useState(0);
+  const faviconUrls = url ? (() => {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      const base = parsed.origin !== window.location.origin
+        ? parsed.origin
+        : parsed.pathname.replace(/\/$/, '');
+      return [base + '/favicon.png', base + '/favicon.ico'];
+    } catch {
+      return [];
+    }
+  })() : [];
+
+  if (tryIndex < faviconUrls.length) {
+    return <img src={faviconUrls[tryIndex]} alt={name} className="app-favicon-img" style={size ? { width: size, height: size } : undefined} onError={() => setTryIndex(i => i + 1)} />;
+  }
+  return <span>{icon}</span>;
+}
+
 function App() {
   // Path-based view detection
   const [currentView, setCurrentView] = useState<'wallet' | 'admin'>(() => {
@@ -221,6 +245,10 @@ function App() {
 
   // Chain addresses (derived from wallet info)
   const [chainAddresses, setChainAddresses] = useState<ChainAddress[]>([]);
+  const chainAddressesRef = useRef<ChainAddress[]>([]);
+
+  // PRF authentication mutex — only one WebAuthn ceremony can run at a time
+  const prfPendingRef = useRef<Promise<{ prfOutput: ArrayBuffer; credentialId: string } | null> | null>(null);
 
   // Custom assets
   const [showAddAssetModal, setShowAddAssetModal] = useState(false);
@@ -245,7 +273,17 @@ function App() {
 
   // Dock state
   const [dockVisible, setDockVisible] = useState(false);
-  const [activeApp, setActiveApp] = useState<string | null>(null);
+  const [mobileDockOpen, setMobileDockOpen] = useState(false);
+  const [activeApp, setActiveApp] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.activeApp || null;
+      }
+    } catch {}
+    return null;
+  });
   const [hoveredApp, setHoveredApp] = useState<string | null>(null);
   // Track which apps have active sessions (opened but not closed)
   const [openAppSessions, setOpenAppSessions] = useState<Set<string>>(() => {
@@ -559,10 +597,11 @@ function App() {
         openAppSessions: Array.from(openAppSessions),
         floatingApps,
         focusedApp,
+        activeApp,
         appZoom,
       }));
     } catch {}
-  }, [openAppSessions, floatingApps, focusedApp, appZoom]);
+  }, [openAppSessions, floatingApps, focusedApp, activeApp, appZoom]);
 
   const startAppDrag = (appId: string, e: React.MouseEvent | React.TouchEvent) => {
     const state = floatingApps[appId];
@@ -615,6 +654,7 @@ function App() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatAgentWebhookUrl, setChatAgentWebhookUrl] = useState<string | null>(null);
   const [customLogo, setCustomLogo] = useState<string | null>(null);
+  const [mpcEnabled, setMpcEnabled] = useState(false);
 
   const handleSendChat = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -658,6 +698,9 @@ function App() {
 
   // Admin panel state
   const [dbUsers, setDbUsers] = useState<DbUser[]>([]);
+  const [dbUsersPagination, setDbUsersPagination] = useState<{ total: number; limit: number; offset: number; hasMore: boolean } | null>(null);
+  const [dbUsersSearch, setDbUsersSearch] = useState('');
+  const [dbUsersPage, setDbUsersPage] = useState(0);
   const [adminLoading, setAdminLoading] = useState(false);
   const [nodeName, setNodeName] = useState<string | null>(null);
   const [cantonVersion, setCantonVersion] = useState<string | null>(null);
@@ -689,6 +732,7 @@ function App() {
     CHAT_AGENT_WEBHOOK_URL: string;
     SPLICE_HOST: string;
     CANTON_JSON_HOST: string;
+    MPC_ENABLED: string;
   }
   interface RpcEndpointRow {
     id: string;
@@ -732,7 +776,7 @@ function App() {
   const [editingConfig, setEditingConfig] = useState(false);
   const [editConfigData, setEditConfigData] = useState<ConfigData | null>(null);
   const [superadminSection, setSuperadminSection] = useState<'admin-users' | 'config' | 'users' | 'codes' | 'rpc' | 'apps'>('admin-users');
-  const [adminSidebarCollapsed, setAdminSidebarCollapsed] = useState(false);
+  const [adminSidebarCollapsed, setAdminSidebarCollapsed] = useState(() => window.innerWidth <= 768);
   const [rpcNetworkMode, setRpcNetworkMode] = useState<'mainnet' | 'testnet'>('mainnet');
   const [rpcEndpoints, setRpcEndpoints] = useState<RpcEndpointRow[]>([]);
   const [rpcLoading, setRpcLoading] = useState(false);
@@ -843,6 +887,7 @@ function App() {
         };
         chatAgentWebhookUrl?: string | null;
         logo?: string | null;
+        mpcEnabled?: boolean;
       }>;
       if (data.success && data.data) {
         if (data.data.theme) setTheme(data.data.theme);
@@ -870,6 +915,9 @@ function App() {
         }
         if (data.data.logo) {
           setCustomLogo(data.data.logo);
+        }
+        if (data.data.mpcEnabled !== undefined) {
+          setMpcEnabled(data.data.mpcEnabled);
         }
       }
     } catch (error) {
@@ -921,6 +969,10 @@ function App() {
     }));
   }, [chainAddresses]);
 
+  const getNetwork = useCallback((): 'mainnet' | 'testnet' => {
+    return networkMode;
+  }, [networkMode]);
+
   const getAssets = useCallback(() => {
     return assets.map(a => ({
       id: a.symbol,
@@ -968,6 +1020,7 @@ function App() {
     walletBridgeRef.current = new WalletBridge({
       getUser,
       getAddresses,
+      getNetwork,
       getAssets,
       getTransactions,
       getTransferOffers,
@@ -1027,7 +1080,7 @@ function App() {
         }
         throw new Error(data.error || 'Query failed');
       },
-      onCantonCreate: async (params: { templateId: string; payload: Record<string, unknown> }) => {
+      onCantonCreate: async (params: { templateId: string; payload: Record<string, unknown>; actAs?: string[] }) => {
         const response = await fetch(`${API_BASE}/api/canton/create`, {
           method: 'POST',
           headers: {
@@ -1075,35 +1128,17 @@ function App() {
       },
       // EVM Transaction Operations - Client-side signing with PRF
       onSignEVMTransaction: async (params: { transaction: { to: string; value?: string; data?: string; chainId: number } }) => {
-        // Get EVM address from chainAddresses
-        const evmAddr = chainAddresses.find(a => a.chain === 'Ethereum');
+        const evmAddr = chainAddressesRef.current.find(a => a.chain === 'Ethereum');
         if (!evmAddr) {
           throw new Error('No EVM wallet found');
         }
 
-        // Request passkey authentication to get PRF output
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        // Get encrypted private key from backend
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=evm`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        // Decrypt private key using PRF output
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
-
-        // Sign transaction
+        const { privateKey, ctx } = await getSigningContext('evm');
         const signed = await evmSigner.signTransaction(
           params.transaction,
           privateKey,
-          evmAddr.address
+          evmAddr.address,
+          ctx
         );
 
         return {
@@ -1112,94 +1147,64 @@ function App() {
         };
       },
       onSendEVMTransaction: async (params: { transaction: { to: string; value?: string; data?: string; chainId: number } }) => {
-        // Get EVM address from chainAddresses
-        const evmAddr = chainAddresses.find(a => a.chain === 'Ethereum');
+        const evmAddr = chainAddressesRef.current.find(a => a.chain === 'Ethereum');
         if (!evmAddr) {
-          throw new Error('No EVM wallet found');
+          throw new Error(`No EVM wallet found. Available chains: ${chainAddressesRef.current.map(a => a.chain).join(', ') || 'none'}`);
         }
 
-        // Request passkey authentication to get PRF output
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
+        console.log('[SendEVM] Sending tx on chain', params.transaction.chainId, 'from', evmAddr.address, 'to', params.transaction.to || '(contract deploy)', 'data length:', params.transaction.data?.length || 0);
+        let privateKey: string;
+        let ctx: any;
+        try {
+          const sigCtx = await getSigningContext('evm');
+          privateKey = sigCtx.privateKey;
+          ctx = sigCtx.ctx;
+          console.log('[SendEVM] Got signing context, mode:', ctx?.mode || 'local', 'key length:', privateKey?.length || 0);
+        } catch (err: any) {
+          console.error('[SendEVM] getSigningContext failed:', err?.name, err?.message);
+          throw err;
         }
+        try {
+          const result = await evmSigner.signAndSendTransaction(
+            params.transaction,
+            privateKey,
+            evmAddr.address,
+            ctx
+          );
 
-        // Get encrypted private key from backend
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=evm`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
+          console.log('[SendEVM] Success:', result.transactionHash);
+          return {
+            transactionHash: result.transactionHash,
+            status: result.status as 'pending' | 'confirmed' | 'failed'
+          };
+        } catch (err: any) {
+          console.error('[SendEVM] signAndSend failed:', err?.name, err?.message, 'Chain:', params.transaction.chainId);
+          throw err;
         }
-
-        // Decrypt private key using PRF output
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
-
-        // Sign and send transaction
-        const result = await evmSigner.signAndSendTransaction(
-          params.transaction,
-          privateKey,
-          evmAddr.address
-        );
-
-        return {
-          transactionHash: result.transactionHash,
-          status: result.status as 'pending' | 'confirmed' | 'failed'
-        };
       },
       onSignTypedData: async (params: { typedData: { types: any; primaryType: string; domain: any; message: any } }) => {
-        // Get EVM address from chainAddresses
-        const evmAddr = chainAddresses.find(a => a.chain === 'Ethereum');
+        const evmAddr = chainAddressesRef.current.find(a => a.chain === 'Ethereum');
         if (!evmAddr) {
           throw new Error('No EVM wallet found');
         }
 
-        // Request passkey authentication to get PRF output
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        // Get encrypted private key from backend
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=evm`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        // Decrypt private key using PRF output
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
-
-        // Sign typed data
-        return evmSigner.signTypedData(params.typedData, privateKey);
+        const { privateKey, ctx } = await getSigningContext('evm');
+        return evmSigner.signTypedData(params.typedData, privateKey, ctx);
+      },
+      // EVM Transaction Receipt
+      onGetTransactionReceipt: async (params: { txHash: string; chainId: number }) => {
+        return evmSigner.getTransactionReceipt(params.chainId, params.txHash);
       },
       // Bitcoin Transaction Operations
       onSignBTCTransaction: async (params: { to: string; amount: number; fee?: number; network?: 'mainnet' | 'testnet' }) => {
-        const btcAddr = chainAddresses.find(a => a.chain === 'Bitcoin');
+        const btcAddr = chainAddressesRef.current.find(a => a.chain === 'Bitcoin');
         if (!btcAddr) {
           throw new Error('No Bitcoin wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=btc`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('btc');
         const network = params.network || 'mainnet';
 
-        // Get UTXOs for the address
         const utxos = await btcSigner.getUTXOs(btcAddr.address, network);
         if (utxos.length === 0) {
           throw new Error('No UTXOs available');
@@ -1212,7 +1217,8 @@ function App() {
           privateKey,
           btcAddr.address,
           params.fee || 1000,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1221,25 +1227,12 @@ function App() {
         };
       },
       onSendBTCTransaction: async (params: { to: string; amount: number; fee?: number; network?: 'mainnet' | 'testnet' }) => {
-        const btcAddr = chainAddresses.find(a => a.chain === 'Bitcoin');
+        const btcAddr = chainAddressesRef.current.find(a => a.chain === 'Bitcoin');
         if (!btcAddr) {
           throw new Error('No Bitcoin wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=btc`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('btc');
         const network = params.network || 'mainnet';
 
         const utxos = await btcSigner.getUTXOs(btcAddr.address, network);
@@ -1254,7 +1247,8 @@ function App() {
           privateKey,
           btcAddr.address,
           params.fee || 1000,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1264,32 +1258,20 @@ function App() {
       },
       // Solana Transaction Operations
       onSignSOLTransaction: async (params: { to: string; amount: number; network?: 'mainnet' | 'devnet' }) => {
-        const solAddr = chainAddresses.find(a => a.chain === 'Solana');
+        const solAddr = chainAddressesRef.current.find(a => a.chain === 'Solana');
         if (!solAddr) {
           throw new Error('No Solana wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=svm`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('svm');
         const network = params.network || 'mainnet';
 
         const signed = await solSigner.signTransaction(
           params.to,
           params.amount,
           privateKey,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1298,32 +1280,20 @@ function App() {
         };
       },
       onSendSOLTransaction: async (params: { to: string; amount: number; network?: 'mainnet' | 'devnet' }) => {
-        const solAddr = chainAddresses.find(a => a.chain === 'Solana');
+        const solAddr = chainAddressesRef.current.find(a => a.chain === 'Solana');
         if (!solAddr) {
           throw new Error('No Solana wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=svm`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('svm');
         const network = params.network || 'mainnet';
 
         const result = await solSigner.signAndSendTransaction(
           params.to,
           params.amount,
           privateKey,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1333,32 +1303,20 @@ function App() {
       },
       // TRON Transaction Operations
       onSignTRONTransaction: async (params: { to: string; amount: number; network?: 'mainnet' | 'shasta' }) => {
-        const tronAddr = chainAddresses.find(a => a.chain === 'TRON');
+        const tronAddr = chainAddressesRef.current.find(a => a.chain === 'TRON');
         if (!tronAddr) {
           throw new Error('No TRON wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=tron`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('tron');
         const network = params.network || 'mainnet';
 
         const signed = await tronSigner.signTransaction(
           params.to,
           params.amount,
           privateKey,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1368,32 +1326,20 @@ function App() {
         };
       },
       onSendTRONTransaction: async (params: { to: string; amount: number; network?: 'mainnet' | 'shasta' }) => {
-        const tronAddr = chainAddresses.find(a => a.chain === 'TRON');
+        const tronAddr = chainAddressesRef.current.find(a => a.chain === 'TRON');
         if (!tronAddr) {
           throw new Error('No TRON wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=tron`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('tron');
         const network = params.network || 'mainnet';
 
         const result = await tronSigner.signAndSendTransaction(
           params.to,
           params.amount,
           privateKey,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1403,25 +1349,12 @@ function App() {
       },
       // TON Transaction Operations
       onSignTONTransaction: async (params: { to: string; amount: bigint; message?: string; network?: 'mainnet' | 'testnet' }) => {
-        const tonAddr = chainAddresses.find(a => a.chain === 'TON');
+        const tonAddr = chainAddressesRef.current.find(a => a.chain === 'TON');
         if (!tonAddr) {
           throw new Error('No TON wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=ton`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('ton');
         const network = params.network || 'mainnet';
 
         const signed = await tonSigner.signTransaction(
@@ -1429,7 +1362,8 @@ function App() {
           params.amount,
           privateKey,
           params.message,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1438,25 +1372,12 @@ function App() {
         };
       },
       onSendTONTransaction: async (params: { to: string; amount: bigint; message?: string; network?: 'mainnet' | 'testnet' }) => {
-        const tonAddr = chainAddresses.find(a => a.chain === 'TON');
+        const tonAddr = chainAddressesRef.current.find(a => a.chain === 'TON');
         if (!tonAddr) {
           throw new Error('No TON wallet found');
         }
 
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=ton`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext('ton');
         const network = params.network || 'mainnet';
 
         const result = await tonSigner.signAndSendTransaction(
@@ -1464,7 +1385,8 @@ function App() {
           params.amount,
           privateKey,
           params.message,
-          network
+          network,
+          ctx
         );
 
         return {
@@ -1474,11 +1396,6 @@ function App() {
       },
       // Generic message signing for all chains
       onSignMessage: async (params: { message: string; chain: string }) => {
-        const prfOutput = await requestPrfAuthentication();
-        if (!prfOutput) {
-          throw new Error('Passkey authentication required for signing');
-        }
-
         let chainType: string;
         switch (params.chain.toLowerCase()) {
           case 'ethereum':
@@ -1506,30 +1423,27 @@ function App() {
             throw new Error(`Unsupported chain: ${params.chain}`);
         }
 
-        const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=${chainType}`, {
-          headers: { 'Authorization': `Bearer ${sessionId}` }
-        });
-        const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-        if (!keyData.success || !keyData.data) {
-          throw new Error('Failed to get encrypted key');
-        }
-
-        const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+        const { privateKey, ctx } = await getSigningContext(chainType);
 
         switch (chainType) {
           case 'evm':
-            return evmSigner.signMessage(params.message, privateKey);
+            return evmSigner.signMessage(params.message, privateKey, ctx);
           case 'svm':
-            return solSigner.signMessage(params.message, privateKey);
+            return solSigner.signMessage(params.message, privateKey, ctx);
           case 'tron':
-            return tronSigner.signMessage(params.message, privateKey);
+            return tronSigner.signMessage(params.message, privateKey, ctx);
           case 'ton':
-            return tonSigner.signMessage(params.message, privateKey);
+            return tonSigner.signMessage(params.message, privateKey, ctx);
           default:
             throw new Error(`Message signing not supported for ${params.chain}`);
         }
       },
     }, allowedIframeOrigins.length > 0 ? allowedIframeOrigins : undefined);
+
+    // Re-register any existing iframes with the new bridge
+    iframeRefs.current.forEach((iframe, appId) => {
+      walletBridgeRef.current?.registerIframe(appId, iframe);
+    });
 
     return () => {
       walletBridgeRef.current?.destroy();
@@ -1543,12 +1457,13 @@ function App() {
       walletBridgeRef.current.updateCallbacks({
         getUser,
         getAddresses,
+        getNetwork,
         getAssets,
         getTransactions,
         getTransferOffers,
       });
     }
-  }, [getUser, getAddresses, getAssets, getTransactions, getTransferOffers]);
+  }, [getUser, getAddresses, getNetwork, getAssets, getTransactions, getTransferOffers]);
 
   // Notify iframes when assets change
   useEffect(() => {
@@ -1556,6 +1471,20 @@ function App() {
       walletBridgeRef.current.notifyAssetsChanged();
     }
   }, [assets]);
+
+  // Notify iframes when user changes (login/logout/switch account)
+  useEffect(() => {
+    if (walletBridgeRef.current) {
+      walletBridgeRef.current.notifyUserChanged(authUser ?? null);
+    }
+  }, [authUser]);
+
+  // Notify iframes when network mode changes (mainnet/testnet toggle)
+  useEffect(() => {
+    if (walletBridgeRef.current) {
+      walletBridgeRef.current.notifyNetworkChanged();
+    }
+  }, [networkMode]);
 
   // Register iframe when app opens
   const registerAppIframe = useCallback((appId: string, iframe: HTMLIFrameElement | null) => {
@@ -1591,8 +1520,15 @@ function App() {
     }
   };
 
-  // Request PRF authentication for signing operations
-  const requestPrfAuthentication = async (): Promise<ArrayBuffer | null> => {
+  // Request PRF authentication for signing operations (with mutex)
+  const requestPrfAuthentication = async (): Promise<{ prfOutput: ArrayBuffer; credentialId: string } | null> => {
+    // If a PRF request is already in flight, wait for it instead of starting a second one
+    if (prfPendingRef.current) {
+      console.log('[PRF] Waiting for existing authentication to complete');
+      return prfPendingRef.current;
+    }
+
+    const promise = (async (): Promise<{ prfOutput: ArrayBuffer; credentialId: string } | null> => {
     try {
       // Get PRF auth options from server
       const optionsRes = await fetch(`${API_BASE}/api/auth/passkey/prf-options`, {
@@ -1639,19 +1575,88 @@ function App() {
         throw new Error('Authentication failed');
       }
 
+      // Log which credential was used
+      console.log('[PRF-Diag] Credential ID used:', credential.id);
+      console.log('[PRF-Diag] Credential rawId (b64):', bufferToBase64URLString(credential.rawId));
+
       // Get PRF output
       const clientExtResults = credential.getClientExtensionResults() as any;
       const prfOutput = clientExtResults?.prf?.results?.first;
+
+      if (prfOutput) {
+        const fp = Array.from(new Uint8Array(prfOutput).slice(0, 8))
+          .map(b => b.toString(16).padStart(2, '0')).join('');
+        console.log('[PRF-Diag] PRF output fingerprint:', fp, 'length:', prfOutput.byteLength);
+      }
 
       if (!prfOutput) {
         throw new Error('PRF output not available. Your passkey may not support encryption.');
       }
 
-      return prfOutput;
+      return { prfOutput, credentialId: credential.id };
     } catch (error) {
       console.error('PRF authentication error:', error);
       return null;
     }
+    })();
+
+    prfPendingRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      prfPendingRef.current = null;
+    }
+  };
+
+  // === MPC Signing Context Helper ===
+  // Consolidates PRF→fetch→decrypt→dispatch for all signing operations
+  const getSigningContext = async (chainType: string): Promise<{ privateKey: string; ctx: SigningContext }> => {
+    console.log('[SignCtx] Requesting PRF for chainType:', chainType);
+    const prfResult = await requestPrfAuthentication();
+    if (!prfResult) {
+      throw new Error('Passkey authentication required for signing');
+    }
+    const { prfOutput, credentialId } = prfResult;
+    console.log('[SignCtx] PRF ok, fetching encrypted key for credential:', credentialId);
+
+    const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=${chainType}&credentialId=${encodeURIComponent(credentialId)}`, {
+      headers: { 'Authorization': `Bearer ${sessionId}` }
+    });
+    const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string; keyType?: string; mpcKeyId?: string }>;
+    if (!keyData.success || !keyData.data) {
+      throw new Error('Failed to get encrypted key');
+    }
+    console.log('[SignCtx] Got encrypted key, keyType:', keyData.data.keyType || 'full', 'length:', keyData.data.encryptedKey?.length);
+    console.log('[SignCtx-Diag] Encrypted key first 24 chars:', keyData.data.encryptedKey?.substring(0, 24));
+
+    let decrypted: string;
+    try {
+      decrypted = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+      console.log('[SignCtx] Decryption ok, key length:', decrypted?.length);
+    } catch (err: any) {
+      console.error('[SignCtx] decryptPrivateKey FAILED:', err?.name, err?.message);
+      throw err;
+    }
+
+    if (keyData.data.keyType === 'mpc_share') {
+      // MPC mode: decrypted data is the JSON client key share
+      const mpcClient = new MpcClient(API_BASE, sessionId!);
+      return {
+        privateKey: '0'.repeat(64), // Dummy key for address derivation only
+        ctx: {
+          mode: 'mpc',
+          mpcClient,
+          clientKeyData: decrypted,
+          chainType
+        }
+      };
+    }
+
+    // Local mode: decrypted data is the full private key hex
+    return {
+      privateKey: decrypted,
+      ctx: { mode: 'local' }
+    };
   };
 
   // === Passkey Management ===
@@ -1681,7 +1686,33 @@ function App() {
     setAddingPasskey(true);
     setSettingsError('');
     try {
-      // Get add-passkey options
+      // Step 1: Authenticate with existing passkey to decrypt all wallet keys
+      console.log('[AddPasskey] Step 1: Authenticating with existing passkey for key re-encryption');
+      const oldPrf = await requestPrfAuthentication();
+      if (!oldPrf) {
+        throw new Error('Passkey authentication required to add a new passkey');
+      }
+
+      const walletKeys: { chainType: string; privateKey: string; keyType: string }[] = [];
+      for (const chainType of ['evm', 'svm', 'btc', 'tron', 'ton']) {
+        try {
+          const keyRes = await fetch(
+            `${API_BASE}/api/wallet/private-key?chainType=${chainType}&credentialId=${encodeURIComponent(oldPrf.credentialId)}`,
+            { headers: { 'Authorization': `Bearer ${sessionId}` } }
+          );
+          const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string; keyType?: string }>;
+          if (keyData.success && keyData.data?.encryptedKey) {
+            const decrypted = await decryptPrivateKey(oldPrf.prfOutput, keyData.data.encryptedKey);
+            walletKeys.push({ chainType, privateKey: decrypted, keyType: keyData.data.keyType || 'full' });
+          }
+        } catch (err) {
+          console.warn(`[AddPasskey] Could not decrypt ${chainType} key, skipping:`, err);
+        }
+      }
+      console.log('[AddPasskey] Decrypted', walletKeys.length, 'wallet keys');
+
+      // Step 2: Create new passkey
+      console.log('[AddPasskey] Step 2: Creating new passkey');
       const optionsRes = await fetch(`${API_BASE}/api/auth/passkey/add-options`, {
         method: 'POST',
         headers: {
@@ -1696,7 +1727,6 @@ function App() {
 
       const options = optionsData.data.options;
 
-      // Convert for native WebAuthn API
       const publicKeyOptions: PublicKeyCredentialCreationOptions = {
         challenge: base64URLStringToBuffer(options.challenge),
         rp: options.rp,
@@ -1738,7 +1768,7 @@ function App() {
         clientExtensionResults: {}
       };
 
-      // Verify
+      // Verify and register the new passkey server-side
       const verifyRes = await fetch(`${API_BASE}/api/auth/passkey/add-verify`, {
         method: 'POST',
         headers: {
@@ -1747,13 +1777,90 @@ function App() {
         },
         body: JSON.stringify({ response: credentialJSON, name: passkeyName || undefined })
       });
-      const verifyData = await verifyRes.json() as ApiResponse<{ id: string }>;
+      const verifyData = await verifyRes.json() as ApiResponse<{ id: string; credentialId: string }>;
       if (!verifyData.success) {
         throw new Error(verifyData.error || 'Verification failed');
       }
 
+      // Step 3: PRF authentication with the NEW passkey
+      console.log('[AddPasskey] Step 3: PRF auth with new passkey');
+      if (walletKeys.length > 0) {
+        try {
+          const rpId = options.rp?.id || new URL(window.location.href).hostname;
+          // Get a fresh challenge for the PRF get
+          const prfOptionsRes = await fetch(`${API_BASE}/api/auth/passkey/prf-options`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${sessionId}`
+            }
+          });
+          const prfOptionsData = await prfOptionsRes.json() as ApiResponse<{ options: any }>;
+          if (!prfOptionsData.success || !prfOptionsData.data) {
+            throw new Error('Failed to get PRF options for new passkey');
+          }
+
+          const newPrfOptions: PublicKeyCredentialRequestOptions = {
+            challenge: base64URLStringToBuffer(prfOptionsData.data.options.challenge),
+            timeout: 60000,
+            rpId,
+            allowCredentials: [{
+              id: credential.rawId,
+              type: 'public-key' as const,
+            }],
+            userVerification: 'required',
+            extensions: {
+              prf: {
+                eval: {
+                  first: PRF_SALT
+                }
+              }
+            } as any
+          };
+
+          const newPrfCredential = await navigator.credentials.get({
+            publicKey: newPrfOptions
+          }) as PublicKeyCredential;
+
+          const newClientExt = newPrfCredential?.getClientExtensionResults() as any;
+          const newPrfOutput = newClientExt?.prf?.results?.first;
+
+          if (!newPrfOutput) {
+            console.warn('[AddPasskey] New passkey does not support PRF, skipping re-encryption');
+          } else {
+            // Step 4: Re-encrypt all wallet keys with new PRF
+            console.log('[AddPasskey] Step 4: Re-encrypting', walletKeys.length, 'keys with new PRF');
+            const newEncryptionKey = await deriveEncryptionKey(newPrfOutput);
+            const reEncryptedKeys = await Promise.all(
+              walletKeys.map(async (wk) => ({
+                chainType: wk.chainType,
+                encryptedKey: await encryptAESGCM(newEncryptionKey, wk.privateKey),
+                keyType: wk.keyType
+              }))
+            );
+
+            // Step 5: Store per-passkey encrypted keys
+            console.log('[AddPasskey] Step 5: Storing re-encrypted keys');
+            await fetch(`${API_BASE}/api/wallet/passkey-keys`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${sessionId}`
+              },
+              body: JSON.stringify({
+                credentialId: credential.id,
+                keys: reEncryptedKeys
+              })
+            });
+            console.log('[AddPasskey] Re-encryption complete');
+          }
+        } catch (reEncErr: any) {
+          console.error('[AddPasskey] Re-encryption failed (passkey still added):', reEncErr);
+          // Don't fail the whole operation — the passkey was still registered
+        }
+      }
+
       setNewPasskeyName('');
-      // Reload passkey list
       await loadPasskeys();
     } catch (error: any) {
       if (error.name !== 'NotAllowedError') {
@@ -1881,14 +1988,13 @@ function App() {
         }
       };
 
-      // Verify registration
+      // Step 1: Register the user first (no wallets yet)
       const verifyRes = await fetch(`${API_BASE}/api/auth/passkey/register-verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: optionsData.data.userId,
-          response: credentialJSON,
-          walletAddresses: undefined
+          response: credentialJSON
         })
       });
       const verifyData = await verifyRes.json() as ApiResponse<{ sessionId: string; user: AuthUser }>;
@@ -1897,12 +2003,136 @@ function App() {
         throw new Error(verifyData.error || 'Registration failed');
       }
 
-      // Save session
-      localStorage.setItem('sessionId', verifyData.data.sessionId);
-      setSessionId(verifyData.data.sessionId);
-      setAuthUser(verifyData.data.user);
+      // Step 2: Save session (needed for wallet storage API calls)
+      const newSessionId = verifyData.data.sessionId;
+      localStorage.setItem('sessionId', newSessionId);
+      setSessionId(newSessionId);
 
+      // Step 3: Do a PRF get() to obtain encryption key for wallet generation
+      console.log('[Register] Performing PRF get() for wallet generation...');
+      const freshChallenge = new Uint8Array(32);
+      crypto.getRandomValues(freshChallenge);
+      const prfGetOptions: PublicKeyCredentialRequestOptions = {
+        challenge: freshChallenge,
+        rpId: options.rp.id,
+        allowCredentials: [{
+          id: credential.rawId,
+          type: 'public-key' as const
+        }],
+        extensions: {
+          prf: { eval: { first: PRF_SALT } }
+        } as any
+      };
+      const prfCredential = await navigator.credentials.get({
+        publicKey: prfGetOptions
+      }) as PublicKeyCredential;
+
+      const prfExtResults = prfCredential?.getClientExtensionResults() as any;
+      const walletPrfOutput = prfExtResults?.prf?.results?.first;
+
+      if (!walletPrfOutput) {
+        console.error('[Register] PRF output not available — wallets will be generated on first login');
+        setAuthUser(verifyData.data.user);
+        setLoginUsername('');
+        return;
+      }
+
+      console.log('[Register] PRF output obtained, generating wallets...');
+
+      // Step 4: Generate wallets
+      let walletAddresses: WalletData[] = [];
+      let pendingMpcKeygens: Awaited<ReturnType<typeof generateAllMpcWallets>> = [];
+
+      if (mpcEnabled) {
+        const mpcWallets = await generateAllMpcWallets(walletPrfOutput, loginUsername);
+        pendingMpcKeygens = mpcWallets;
+        walletAddresses = mpcWallets.map(w => ({
+          chainType: w.chainType,
+          address: w.address,
+          encryptedKey: w.clientDataEncrypted,
+          keyType: 'mpc_share' as const,
+          mpcKeyId: w.mpcKeyId
+        }));
+      } else {
+        walletAddresses = await generateWalletsForChains(
+          walletPrfOutput,
+          ['evm', 'svm', 'btc', 'tron', 'ton']
+        );
+      }
+      console.log('[Register] Generated wallets:', walletAddresses.map(w => ({ chainType: w.chainType, address: w.address })));
+
+      // Step 5: Store wallets via wallet/store endpoint
+      if (walletAddresses.length > 0) {
+        const storeRes = await fetch(`${API_BASE}/api/wallet/store`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${newSessionId}`
+          },
+          body: JSON.stringify({ walletAddresses })
+        });
+        const storeData = await storeRes.json() as ApiResponse<{ stored: number }>;
+        if (!storeData.success) {
+          console.error('[Register] Failed to store wallets:', storeData.error);
+        } else {
+          console.log('[Register] Stored wallets:', storeData.data?.stored);
+        }
+
+        // Step 5b: Store per-passkey encrypted key copies for multi-passkey support
+        try {
+          const passkeyKeys = walletAddresses
+            .filter(w => w.privateKeyEncrypted || w.encryptedKey)
+            .map(w => ({
+              chainType: w.chainType,
+              encryptedKey: w.privateKeyEncrypted || w.encryptedKey || '',
+              keyType: w.keyType || 'full'
+            }));
+          if (passkeyKeys.length > 0) {
+            await fetch(`${API_BASE}/api/wallet/passkey-keys`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${newSessionId}`
+              },
+              body: JSON.stringify({
+                credentialId: credential.id,
+                keys: passkeyKeys
+              })
+            });
+            console.log('[Register] Stored per-passkey encrypted keys');
+          }
+        } catch (pekErr) {
+          console.error('[Register] Failed to store per-passkey keys (non-fatal):', pekErr);
+        }
+      }
+
+      // Step 6: Send MPC server shares (non-blocking — don't hold up UI)
+      const mpcPromises = pendingMpcKeygens.map(async (mpcWallet) => {
+        try {
+          const res = await fetch(`${API_BASE}/api/mpc/keygen`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${newSessionId}`
+            },
+            body: JSON.stringify({
+              ...mpcWallet.serverShareData,
+              mpcKeyId: mpcWallet.mpcKeyId
+            })
+          });
+          if (!res.ok) console.error(`[Register] MPC keygen ${mpcWallet.chainType}: ${res.status}`);
+        } catch (e) {
+          console.error(`[Register] MPC keygen failed for ${mpcWallet.chainType}:`, e);
+        }
+      });
+      // Fire MPC keygens in parallel but don't block UI
+      Promise.all(mpcPromises).catch(() => {});
+
+      // Step 7: Now show the main view — wallets are stored, trigger data load
+      setAuthUser(verifyData.data.user);
       setLoginUsername('');
+      // Force wallet data reload after a tick to ensure DB consistency
+      setTimeout(() => { loadWalletData(true); }, 500);
     } catch (error: any) {
       console.error('Registration error:', error);
       setLoginError(error.message || 'Registration failed');
@@ -1971,6 +2201,7 @@ function App() {
       const clientExtResults = credential.getClientExtensionResults() as any;
       const prfOutput = clientExtResults?.prf?.results?.first;
       let walletAddresses: WalletData[] = [];
+      let pendingMpcKeygens: Awaited<ReturnType<typeof generateAllMpcWallets>> = [];
 
       console.log('[Login Debug] PRF output available:', !!prfOutput);
       console.log('[Login Debug] Missing chain types:', missingChainTypes);
@@ -1978,10 +2209,32 @@ function App() {
       // If PRF is available and user has missing chain wallets, generate them client-side
       if (prfOutput && missingChainTypes.length > 0) {
         console.log(`[Login Debug] Generating wallets for missing chains: ${missingChainTypes.join(', ')}`);
-        walletAddresses = await generateWalletsForChains(
-          prfOutput,
-          missingChainTypes as Array<'evm' | 'svm' | 'btc' | 'tron' | 'ton'>
-        );
+
+        if (mpcEnabled) {
+          // MPC mode: generate split key shares
+          const mpcWallets = await generateAllMpcWallets(prfOutput, loginUsername);
+          // Filter to only missing chain types
+          const filteredMpc = mpcWallets.filter(w =>
+            missingChainTypes.includes(w.chainType)
+          );
+
+          // Store MPC data for sending server shares after login succeeds
+          pendingMpcKeygens = filteredMpc;
+
+          // Convert to WalletData format for backend
+          walletAddresses = filteredMpc.map(w => ({
+            chainType: w.chainType,
+            address: w.address,
+            encryptedKey: w.clientDataEncrypted,
+            keyType: 'mpc_share' as const,
+            mpcKeyId: w.mpcKeyId
+          }));
+        } else {
+          walletAddresses = await generateWalletsForChains(
+            prfOutput,
+            missingChainTypes as Array<'evm' | 'svm' | 'btc' | 'tron' | 'ton'>
+          );
+        }
         console.log('[Login Debug] Generated wallet addresses:', walletAddresses.map(w => ({ chainType: w.chainType, address: w.address })));
       } else if (!prfOutput) {
         console.warn('[Login Debug] PRF output not available - cannot generate wallets client-side');
@@ -2023,8 +2276,33 @@ function App() {
       // Save session
       localStorage.setItem('sessionId', verifyData.data.sessionId);
       setSessionId(verifyData.data.sessionId);
-      setAuthUser(verifyData.data.user);
 
+      // Send MPC server shares BEFORE triggering UI update (avoids race with loadWalletData)
+      if (pendingMpcKeygens.length > 0) {
+        const mpcPromises = pendingMpcKeygens.map(async (mpcWallet) => {
+          try {
+            const res = await fetch(`${API_BASE}/api/mpc/keygen`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${verifyData.data!.sessionId}`
+              },
+              body: JSON.stringify({
+                ...mpcWallet.serverShareData,
+                mpcKeyId: mpcWallet.mpcKeyId
+              })
+            });
+            if (!res.ok) console.error(`[Login] MPC keygen ${mpcWallet.chainType}: ${res.status}`);
+          } catch (e) {
+            console.error(`[Login] MPC keygen failed for ${mpcWallet.chainType}:`, e);
+          }
+        });
+        // Run all MPC keygens in parallel
+        await Promise.all(mpcPromises);
+      }
+
+      // Now set auth user — this triggers loadWalletData via useEffect
+      setAuthUser(verifyData.data.user);
       setLoginUsername('');
     } catch (error: any) {
       console.error('Login error:', error);
@@ -2093,7 +2371,7 @@ function App() {
 
     // Network mappings
     const evmChainId = network === 'mainnet' ? 1 : 11155111; // Ethereum mainnet vs Sepolia
-    const evmBaseChainId = network === 'mainnet' ? 8453 : 11155111; // Base mainnet vs Sepolia
+    const evmBaseChainId = network === 'mainnet' ? 8453 : 84532; // Base mainnet vs Base Sepolia
     const btcNetwork = network === 'mainnet' ? 'mainnet' : 'testnet';
     const solNetwork = network === 'mainnet' ? 'mainnet' : 'devnet';
     const tronNetwork = network === 'mainnet' ? 'mainnet' : 'shasta';
@@ -2108,11 +2386,11 @@ function App() {
             const ethBalance = await evmSigner.getBalance(wallet.address, evmChainId);
             balances['ETH'] = Number(ethBalance) / 1e18;
             balances['ETH_Ethereum'] = Number(ethBalance) / 1e18;
-            // Fetch ETH balance on Base (multi-chain ETH)
-            if (network === 'mainnet') {
-              const baseBalance = await evmSigner.getBalance(wallet.address, evmBaseChainId);
-              balances['ETH_Base'] = Number(baseBalance) / 1e18;
-            }
+            // Fetch ETH balance on Base
+            console.log('[Balance] Fetching Base balance for', wallet.address, 'on chain', evmBaseChainId);
+            const baseBalance = await evmSigner.getBalance(wallet.address, evmBaseChainId);
+            console.log('[Balance] Base balance:', baseBalance.toString(), '=', Number(baseBalance) / 1e18, 'ETH');
+            balances['ETH_Base'] = Number(baseBalance) / 1e18;
             break;
           }
           case 'btc': {
@@ -2169,7 +2447,7 @@ function App() {
               // ERC20 token balance - use network-appropriate chain ID
               const chainId = network === 'mainnet'
                 ? (chain.chain === 'Base' ? 8453 : 1)
-                : 11155111; // Sepolia for testnet
+                : (chain.chain === 'Base' ? 84532 : 11155111);
               tokenBalance = await evmSigner.getTokenBalance(
                 chain.contractAddress!,
                 wallet.address,
@@ -2229,7 +2507,7 @@ function App() {
         fetch(`${API_BASE}/api/wallet/transactions`, { headers }),
         fetch(`${API_BASE}/api/wallet/info`, { headers }),
         fetch(`${API_BASE}/api/wallet/transfer-offers`, { headers }),
-        fetch(`${API_BASE}/api/assets`),
+        fetch(`${API_BASE}/api/assets?network=${networkModeOverride || networkMode}`),
         fetch(`${API_BASE}/api/wallet/custom-assets`, { headers })
       ]);
 
@@ -2332,6 +2610,7 @@ function App() {
         }
 
         setChainAddresses(addresses);
+        chainAddressesRef.current = addresses;
 
         // Fetch real balances from blockchain RPCs
         if (infoData.data.walletAddresses && infoData.data.walletAddresses.length > 0) {
@@ -2456,6 +2735,7 @@ function App() {
       setTransactions([]);
       setTransferOffers([]);
       setChainAddresses([]);
+      chainAddressesRef.current = [];
     } finally {
       setLoading(false);
       loadingWalletRef.current = false;
@@ -2640,15 +2920,22 @@ function App() {
   };
 
   // Admin functions (require admin token)
-  const fetchDbUsers = async () => {
+  const fetchDbUsers = async (search?: string, page?: number) => {
     if (!hasAdminAuth) return;
     setAdminLoading(true);
     setSuperadminError('');
+    const searchVal = search ?? dbUsersSearch;
+    const pageVal = page ?? dbUsersPage;
+    const limit = 50;
+    const offset = pageVal * limit;
     try {
-      const res = await fetch(`${API_BASE}/api/admin/db-users`, { headers: getAdminHeaders() });
-      const data = await res.json() as ApiResponse<DbUser[]> & { nodeName?: string };
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (searchVal) params.set('search', searchVal);
+      const res = await fetch(`${API_BASE}/api/admin/db-users?${params}`, { headers: getAdminHeaders() });
+      const data = await res.json() as ApiResponse<DbUser[]> & { nodeName?: string; pagination?: { total: number; limit: number; offset: number; hasMore: boolean } };
       if (data.success && data.data) {
         setDbUsers(data.data);
+        setDbUsersPagination(data.pagination || null);
         if (data.nodeName) {
           setNodeName(data.nodeName);
         }
@@ -3760,6 +4047,20 @@ function App() {
     return (
       <div className={`app theme-${theme}`}>
         <div className="superadmin-layout">
+          {/* Mobile hamburger — outside sidebar so it's always accessible */}
+          {adminSidebarCollapsed && (
+            <button
+              className="sidebar-mobile-open"
+              onClick={() => setAdminSidebarCollapsed(false)}
+              title="Show navigation"
+            >
+              ☰
+            </button>
+          )}
+          {/* Sidebar backdrop for mobile */}
+          {!adminSidebarCollapsed && (
+            <div className="sidebar-backdrop" onClick={() => setAdminSidebarCollapsed(true)} />
+          )}
           {/* Left Sidebar */}
           <aside className={`superadmin-sidebar ${adminSidebarCollapsed ? 'collapsed' : ''}`}>
             <div className="sidebar-header">
@@ -3767,64 +4068,35 @@ function App() {
               {superadminUser.isSuperadmin && <span className="superadmin-badge">SUPERADMIN</span>}
               <button
                 className="sidebar-toggle-btn"
-                onClick={() => setAdminSidebarCollapsed(!adminSidebarCollapsed)}
-                title={adminSidebarCollapsed ? 'Show navigation' : 'Hide navigation'}
+                onClick={() => setAdminSidebarCollapsed(true)}
+                title="Hide navigation"
               >
-                {adminSidebarCollapsed ? '☰' : '✕'}
+                ✕
               </button>
             </div>
 
             <nav className="sidebar-nav">
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'admin-users' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('admin-users')}
-              >
-                <ShieldCheck size={18} className="nav-icon" />
-                <span className="nav-label">Admin Users</span>
-                {adminUsers.length > 0 && <span className="nav-badge">{adminUsers.length}</span>}
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'users' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('users')}
-              >
-                <Users size={18} className="nav-icon" />
-                <span className="nav-label">User Management</span>
-                {dbUsers.length > 0 && <span className="nav-badge">{dbUsers.length}</span>}
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'codes' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('codes')}
-              >
-                <KeyRound size={18} className="nav-icon" />
-                <span className="nav-label">Registration Codes</span>
-                {registrationCodes.length > 0 && <span className="nav-badge">{registrationCodes.length}</span>}
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'rpc' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('rpc')}
-              >
-                <Globe size={18} className="nav-icon" />
-                <span className="nav-label">RPC Endpoints</span>
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'apps' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('apps')}
-              >
-                <LayoutGrid size={18} className="nav-icon" />
-                <span className="nav-label">Apps</span>
-              </button>
-
-              <button
-                className={`sidebar-nav-item ${superadminSection === 'config' ? 'active' : ''}`}
-                onClick={() => setSuperadminSection('config')}
-              >
-                <Settings size={18} className="nav-icon" />
-                <span className="nav-label">Configuration</span>
-              </button>
+              {([
+                { id: 'admin-users', icon: <ShieldCheck size={18} className="nav-icon" />, label: 'Admin Users', badge: adminUsers.length },
+                { id: 'users', icon: <Users size={18} className="nav-icon" />, label: 'User Management', badge: dbUsers.length },
+                { id: 'codes', icon: <KeyRound size={18} className="nav-icon" />, label: 'Registration Codes', badge: registrationCodes.length },
+                { id: 'rpc', icon: <Globe size={18} className="nav-icon" />, label: 'RPC Endpoints', badge: 0 },
+                { id: 'apps', icon: <LayoutGrid size={18} className="nav-icon" />, label: 'Apps', badge: 0 },
+                { id: 'config', icon: <Settings size={18} className="nav-icon" />, label: 'Configuration', badge: 0 },
+              ] as const).map(item => (
+                <button
+                  key={item.id}
+                  className={`sidebar-nav-item ${superadminSection === item.id ? 'active' : ''}`}
+                  onClick={() => {
+                    setSuperadminSection(item.id);
+                    if (window.innerWidth <= 768) setAdminSidebarCollapsed(true);
+                  }}
+                >
+                  {item.icon}
+                  <span className="nav-label">{item.label}</span>
+                  {item.badge > 0 && <span className="nav-badge">{item.badge}</span>}
+                </button>
+              ))}
             </nav>
 
             <div className="sidebar-footer">
@@ -3839,7 +4111,7 @@ function App() {
           {/* Main Content */}
           <main className="superadmin-main">
             {superadminError && (
-              <div className={`transfer-status ${superadminError.includes('copied') || superadminError.includes('success') || superadminError.includes('Success') ? 'success' : 'error'}`} style={{ marginBottom: '1rem' }}>
+              <div className={`transfer-status ${superadminError.includes('Failed') || superadminError.includes('error') || superadminError.includes('Error') ? 'error' : 'success'}`} style={{ marginBottom: '1rem' }}>
                 {superadminError}
               </div>
             )}
@@ -3855,7 +4127,7 @@ function App() {
                   {superadminUser.isSuperadmin && (
                     <button
                       onClick={() => setShowCreateAdminUser(true)}
-                      className="send-btn admin-btn"
+                      className="admin-btn-primary"
                     >
                       + New Admin
                     </button>
@@ -3863,51 +4135,59 @@ function App() {
                 </div>
 
                 <div className="admin-users-table">
-                  <div className="admin-table-header">
-                    <span>Username</span>
-                    <span>Display Name</span>
-                    <span>Superadmin</span>
-                    <span>Created</span>
-                    <span>Actions</span>
+                  <div className="rpc-table-container">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Username</th>
+                          <th>Display Name</th>
+                          <th>Superadmin</th>
+                          <th>Created</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {adminUsers.length === 0 ? (
+                          <tr><td colSpan={5} className="no-transactions">No admin users found</td></tr>
+                        ) : (
+                          adminUsers.map((user) => (
+                            <tr key={user.id}>
+                              <td data-label="Username">{user.username}</td>
+                              <td data-label="Display Name">{user.displayName || '-'}</td>
+                              <td data-label="Superadmin">
+                                {superadminUser.isSuperadmin ? (
+                                  <label className="toggle-switch">
+                                    <input
+                                      type="checkbox"
+                                      checked={user.isSuperadmin}
+                                      onChange={() => handleToggleSuperadmin(user.id, user.isSuperadmin)}
+                                      disabled={user.id === superadminUser.id}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                  </label>
+                                ) : (
+                                  user.isSuperadmin ? 'Yes' : 'No'
+                                )}
+                              </td>
+                              <td data-label="Created">{new Date(user.createdAt).toLocaleDateString()}</td>
+                              <td data-label="Actions">
+                                <div className="action-buttons">
+                                  {superadminUser.isSuperadmin && user.id !== superadminUser.id && (
+                                    <button
+                                      onClick={() => handleDeleteAdminUser(user.id)}
+                                      className="admin-btn-danger admin-btn-sm"
+                                    >
+                                      Delete
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
                   </div>
-                  {adminUsers.length === 0 ? (
-                    <div className="no-transactions">No admin users found</div>
-                  ) : (
-                    adminUsers.map((user) => (
-                      <div key={user.id} className="admin-table-row">
-                        <span className="admin-cell">{user.username}</span>
-                        <span className="admin-cell">{user.displayName || '-'}</span>
-                        <span className="admin-cell">
-                          {superadminUser.isSuperadmin ? (
-                            <label className="toggle-switch">
-                              <input
-                                type="checkbox"
-                                checked={user.isSuperadmin}
-                                onChange={() => handleToggleSuperadmin(user.id, user.isSuperadmin)}
-                                disabled={user.id === superadminUser.id}
-                              />
-                              <span className="toggle-slider"></span>
-                            </label>
-                          ) : (
-                            user.isSuperadmin ? 'Yes' : 'No'
-                          )}
-                        </span>
-                        <span className="admin-cell">{new Date(user.createdAt).toLocaleDateString()}</span>
-                        <span className="admin-cell">
-                          <div className="action-buttons">
-                            {superadminUser.isSuperadmin && user.id !== superadminUser.id && (
-                              <button
-                                onClick={() => handleDeleteAdminUser(user.id)}
-                                className="btn-delete"
-                              >
-                                Delete
-                              </button>
-                            )}
-                          </div>
-                        </span>
-                      </div>
-                    ))
-                  )}
                 </div>
               </section>
             )}
@@ -3916,15 +4196,12 @@ function App() {
             {superadminSection === 'config' && (
               <section className="admin-card">
                 <div className="admin-card-header">
-                  <h2>
-                    Configuration
-                    
-                  </h2>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <h2>Configuration</h2>
+                  <div className="admin-flex-row">
                     {superadminUser.isSuperadmin && (
                       <button
                         onClick={() => { fetchPackages(); setShowPackagesModal(true); }}
-                        className="send-btn admin-btn"
+                        className="admin-btn-primary"
                       >
                         Daml Packages
                       </button>
@@ -3932,218 +4209,214 @@ function App() {
                     {superadminUser.isSuperadmin && configData && !editingConfig && (
                       <button
                         onClick={() => { setEditConfigData({...configData}); setEditingConfig(true); }}
-                        className="send-btn admin-btn"
+                        className="admin-btn-primary"
                       >
                         Edit Config
                       </button>
+                    )}
+                    {editingConfig && (
+                      <div className="admin-flex-row">
+                        <button
+                          onClick={() => { setEditingConfig(false); setEditConfigData(null); }}
+                          className="admin-btn-ghost"
+                        >
+                          Cancel
+                        </button>
+                        <button onClick={handleSaveConfig} className="admin-btn-primary">
+                          Save
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
 
                 {configData && (
-                  <div className="section-content">
-                    {editingConfig && editConfigData ? (
-                  <div className="config-edit-form">
-                    <div className="form-group">
-                      <label>Organization Name (ORG_NAME)</label>
-                      <span className="field-descriptor">Display name shown in the app header and browser title</span>
-                      <input
-                        type="text"
-                        value={editConfigData.ORG_NAME}
-                        onChange={(e) => setEditConfigData({...editConfigData, ORG_NAME: e.target.value})}
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>Relying Party Name (RP_NAME)</label>
-                      <span className="field-descriptor">Name shown in browser passkey prompts during registration and login</span>
-                      <input
-                        type="text"
-                        value={editConfigData.RP_NAME}
-                        onChange={(e) => setEditConfigData({...editConfigData, RP_NAME: e.target.value})}
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>Theme</label>
-                      <span className="field-descriptor">Color scheme applied across the entire wallet UI</span>
-                      <select
-                        value={editConfigData.THEME}
-                        onChange={(e) => setEditConfigData({...editConfigData, THEME: e.target.value})}
-                        className="role-select"
-                      >
-                        <option value="purple">Purple</option>
-                        <option value="teal">Teal</option>
-                        <option value="blue">Blue</option>
-                        <option value="green">Green</option>
-                        <option value="orange">Orange</option>
-                        <option value="rose">Rose</option>
-                        <option value="slate">Slate</option>
-                        <option value="light">Light</option>
-                      </select>
-                    </div>
-                    <div className="form-group">
-                      <label>Splice Host (SPLICE_HOST)</label>
-                      <span className="field-descriptor">Canton validator node hostname for ledger API operations</span>
-                      <input
-                        type="text"
-                        value={editConfigData.SPLICE_HOST}
-                        onChange={(e) => setEditConfigData({...editConfigData, SPLICE_HOST: e.target.value})}
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>Canton JSON Host (CANTON_JSON_HOST)</label>
-                      <span className="field-descriptor">Canton JSON API hostname for party and user management</span>
-                      <input
-                        type="text"
-                        value={editConfigData.CANTON_JSON_HOST}
-                        onChange={(e) => setEditConfigData({...editConfigData, CANTON_JSON_HOST: e.target.value})}
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>Chat Agent Webhook URL</label>
-                      <span className="field-descriptor">AI assistant webhook endpoint for the chat panel</span>
-                      <input
-                        type="text"
-                        value={editConfigData.CHAT_AGENT_WEBHOOK_URL}
-                        onChange={(e) => setEditConfigData({...editConfigData, CHAT_AGENT_WEBHOOK_URL: e.target.value})}
-                      />
-                    </div>
-                    <div className="modal-buttons" style={{ marginTop: '1rem' }}>
-                      <button
-                        onClick={() => { setEditingConfig(false); setEditConfigData(null); }}
-                        className="refresh-btn"
-                      >
-                        Cancel
-                      </button>
-                      <button onClick={handleSaveConfig} className="send-btn admin-btn">
-                        Save Configuration
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="config-display">
-                    {cantonVersion && (
-                      <div className="config-item">
-                        <strong>Canton Version:</strong>
-                        <span>{cantonVersion}</span>
-                      </div>
-                    )}
-                    <div className="config-item">
-                      <strong>Organization Name:</strong>
-                      <span>{configData.ORG_NAME}</span>
-                                            <span className="field-descriptor">Display name shown in the app header and browser title</span>
-                    </div>
-                    <div className="config-item">
-                      <strong>RP Name:</strong>
-                      <span>{configData.RP_NAME}</span>
-                                            <span className="field-descriptor">Name shown in browser passkey prompts during registration and login</span>
-                    </div>
-                    <div className="config-item">
-                      <strong>Theme:</strong>
-                      <span>{configData.THEME}</span>
-                                            <span className="field-descriptor">Color scheme applied across the entire wallet UI</span>
-                    </div>
-                    <div className="config-item">
-                      <strong>Splice Host:</strong>
-                      <span>{configData.SPLICE_HOST}</span>
-                                            <span className="field-descriptor">Canton validator node hostname for ledger API operations</span>
-                    </div>
-                    <div className="config-item">
-                      <strong>Canton JSON Host:</strong>
-                      <span>{configData.CANTON_JSON_HOST}</span>
-                                            <span className="field-descriptor">Canton JSON API hostname for party and user management</span>
-                    </div>
-                    <div className="config-item">
-                      <strong>Chat Agent Webhook URL:</strong>
-                      <span style={{ wordBreak: 'break-all' }}>{configData.CHAT_AGENT_WEBHOOK_URL || 'Not configured'}</span>
-                                            <span className="field-descriptor">AI assistant webhook endpoint for the chat panel</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Logo Management - always visible */}
-                <div className="config-display">
-                  <div className="config-item" style={{ marginTop: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.75rem' }}>
-                    <strong style={{ opacity: 0.5, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Logo</strong>
-                  </div>
-                  <div className="config-item" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <img src={customLogo || '/logo.png'} alt="Logo" style={{ width: 40, height: 40, borderRadius: 8, background: 'rgba(0,0,0,0.2)' }} />
-                    <div style={{ display: 'flex', gap: '0.4rem' }}>
-                      <label className="send-btn admin-btn" style={{ cursor: 'pointer', margin: 0 }}>
-                        Upload
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/svg+xml,image/webp"
-                          style={{ display: 'none' }}
-                          onChange={async (e) => {
-                            const file = e.target.files?.[0];
-                            if (!file) return;
-                            if (file.size > 256 * 1024) {
-                              alert('Logo must be under 256KB');
-                              return;
-                            }
-                            const reader = new FileReader();
-                            reader.onload = async () => {
-                              const dataUrl = reader.result as string;
-                              try {
-                                const res = await fetch(`${API_BASE}/api/superadmin/logo`, {
-                                  method: 'PUT',
-                                  headers: { 'Content-Type': 'application/json', 'X-Superadmin-Token': superadminToken! },
-                                  body: JSON.stringify({ logo: dataUrl })
-                                });
-                                const data = await res.json() as { success: boolean };
-                                if (data.success) {
-                                  setCustomLogo(dataUrl);
-                                }
-                              } catch (err) {
-                                console.error('Logo upload failed:', err);
-                              }
-                            };
-                            reader.readAsDataURL(file);
-                            e.target.value = '';
-                          }}
-                        />
-                      </label>
-                      {customLogo && (
-                        <button
-                          className="refresh-btn"
-                          style={{ padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}
-                          onClick={async () => {
-                            try {
-                              const res = await fetch(`${API_BASE}/api/superadmin/logo`, {
-                                method: 'DELETE',
-                                headers: { 'X-Superadmin-Token': superadminToken! }
-                              });
-                              const data = await res.json() as { success: boolean };
-                              if (data.success) {
-                                setCustomLogo(null);
-                              }
-                            } catch (err) {
-                              console.error('Logo reset failed:', err);
-                            }
-                          }}
-                        >
-                          Reset
-                        </button>
+                  <div className="section-content"><div className="config-cards-grid">
+                    {/* General Card */}
+                    <div className="config-card">
+                      <div className="config-card-title">General</div>
+                      {editingConfig && editConfigData ? (
+                        <>
+                          <div className="form-group">
+                            <label>Organization Name</label>
+                            <span className="field-descriptor">Shown in the app header and browser title</span>
+                            <input type="text" value={editConfigData.ORG_NAME} onChange={(e) => setEditConfigData({...editConfigData, ORG_NAME: e.target.value})} />
+                          </div>
+                          <div className="form-group">
+                            <label>Relying Party Name</label>
+                            <span className="field-descriptor">Shown in browser passkey prompts</span>
+                            <input type="text" value={editConfigData.RP_NAME} onChange={(e) => setEditConfigData({...editConfigData, RP_NAME: e.target.value})} />
+                          </div>
+                          <div className="form-group">
+                            <label>Theme</label>
+                            <select value={editConfigData.THEME} onChange={(e) => setEditConfigData({...editConfigData, THEME: e.target.value})} className="role-select">
+                              <option value="purple">Purple</option>
+                              <option value="teal">Teal</option>
+                              <option value="blue">Blue</option>
+                              <option value="green">Green</option>
+                              <option value="orange">Orange</option>
+                              <option value="rose">Rose</option>
+                              <option value="slate">Slate</option>
+                              <option value="light">Light</option>
+                            </select>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          {cantonVersion && (
+                            <div className="config-card-row">
+                              <span className="config-card-label">Canton Version</span>
+                              <span className="config-card-value">{cantonVersion}</span>
+                            </div>
+                          )}
+                          <div className="config-card-row">
+                            <span className="config-card-label">Organization</span>
+                            <span className="config-card-value">{configData.ORG_NAME}</span>
+                          </div>
+                          <div className="config-card-row">
+                            <span className="config-card-label">RP Name</span>
+                            <span className="config-card-value">{configData.RP_NAME}</span>
+                          </div>
+                          <div className="config-card-row">
+                            <span className="config-card-label">Theme</span>
+                            <span className="config-card-value admin-config-capitalize">{configData.THEME}</span>
+                          </div>
+                        </>
                       )}
                     </div>
-                    <span className="field-descriptor" style={{ marginLeft: 'auto' }}>PNG, JPG, SVG or WebP, max 256KB</span>
-                  </div>
 
-                  {boundServices && Object.keys(boundServices).length > 0 && (
-                    <>
-                      <div className="config-item" style={{ marginTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.75rem' }}>
-                        <strong style={{ opacity: 0.5, fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Bound Services</strong>
-                      </div>
-                      {Object.entries(boundServices).map(([key, value]) => (
-                        <div className="config-item" key={key}>
-                          <strong>{key}:</strong>
-                          <span style={{ fontFamily: 'monospace', fontSize: '0.8rem', opacity: 0.7 }}>{value}</span>
+                    {/* Network Card */}
+                    <div className="config-card">
+                      <div className="config-card-title">Network</div>
+                      {editingConfig && editConfigData ? (
+                        <>
+                          <div className="form-group">
+                            <label>Splice Host</label>
+                            <span className="field-descriptor">Canton validator node hostname</span>
+                            <input type="text" value={editConfigData.SPLICE_HOST} onChange={(e) => setEditConfigData({...editConfigData, SPLICE_HOST: e.target.value})} />
+                          </div>
+                          <div className="form-group">
+                            <label>Canton JSON Host</label>
+                            <span className="field-descriptor">JSON API for party management</span>
+                            <input type="text" value={editConfigData.CANTON_JSON_HOST} onChange={(e) => setEditConfigData({...editConfigData, CANTON_JSON_HOST: e.target.value})} />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="config-card-row">
+                            <span className="config-card-label">Splice Host</span>
+                            <span className="config-card-value mono">{configData.SPLICE_HOST || '—'}</span>
+                          </div>
+                          <div className="config-card-row">
+                            <span className="config-card-label">Canton JSON Host</span>
+                            <span className="config-card-value mono">{configData.CANTON_JSON_HOST || '—'}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Security Card */}
+                    <div className="config-card">
+                      <div className="config-card-title">Security</div>
+                      {editingConfig && editConfigData ? (
+                        <div className="form-group">
+                          <label>MPC Signing</label>
+                          <span className="field-descriptor">Split keys into client + server shares</span>
+                          <select value={editConfigData.MPC_ENABLED || 'false'} onChange={(e) => setEditConfigData({...editConfigData, MPC_ENABLED: e.target.value})} className="role-select">
+                            <option value="false">Disabled</option>
+                            <option value="true">Enabled</option>
+                          </select>
                         </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-                  </div>
+                      ) : (
+                        <div className="config-card-row">
+                          <span className="config-card-label">MPC Signing</span>
+                          <span className={`config-card-status ${configData.MPC_ENABLED === 'true' ? 'status-on' : 'status-off'}`}>
+                            {configData.MPC_ENABLED === 'true' ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Integrations Card */}
+                    <div className="config-card">
+                      <div className="config-card-title">Integrations</div>
+                      {editingConfig && editConfigData ? (
+                        <div className="form-group">
+                          <label>Chat Agent Webhook</label>
+                          <span className="field-descriptor">AI assistant webhook endpoint</span>
+                          <input type="text" value={editConfigData.CHAT_AGENT_WEBHOOK_URL} onChange={(e) => setEditConfigData({...editConfigData, CHAT_AGENT_WEBHOOK_URL: e.target.value})} />
+                        </div>
+                      ) : (
+                        <div className="config-card-row">
+                          <span className="config-card-label">Chat Webhook</span>
+                          <span className="config-card-value mono" style={{ wordBreak: 'break-all' }}>{configData.CHAT_AGENT_WEBHOOK_URL || '—'}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Branding Card */}
+                    <div className="config-card">
+                      <div className="config-card-title">Branding</div>
+                      <div className="config-card-row" style={{ alignItems: 'center' }}>
+                        <img src={customLogo || '/logo.png'} alt="Logo" style={{ width: 36, height: 36, borderRadius: 6, background: 'rgba(0,0,0,0.2)', flexShrink: 0 }} />
+                        <div style={{ display: 'flex', gap: '0.4rem', marginLeft: 'auto' }}>
+                          <label className="admin-btn-primary admin-btn-sm" style={{ cursor: 'pointer', margin: 0 }}>
+                            Upload
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                              style={{ display: 'none' }}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                if (file.size > 256 * 1024) { alert('Logo must be under 256KB'); return; }
+                                const reader = new FileReader();
+                                reader.onload = async () => {
+                                  const dataUrl = reader.result as string;
+                                  try {
+                                    const res = await fetch(`${API_BASE}/api/superadmin/logo`, {
+                                      method: 'PUT',
+                                      headers: { 'Content-Type': 'application/json', 'X-Superadmin-Token': superadminToken! },
+                                      body: JSON.stringify({ logo: dataUrl })
+                                    });
+                                    const data = await res.json() as { success: boolean };
+                                    if (data.success) setCustomLogo(dataUrl);
+                                  } catch (err) { console.error('Logo upload failed:', err); }
+                                };
+                                reader.readAsDataURL(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                          {customLogo && (
+                            <button className="admin-btn-ghost admin-btn-sm"
+                              onClick={async () => {
+                                try {
+                                  const res = await fetch(`${API_BASE}/api/superadmin/logo`, { method: 'DELETE', headers: { 'X-Superadmin-Token': superadminToken! } });
+                                  const data = await res.json() as { success: boolean };
+                                  if (data.success) setCustomLogo(null);
+                                } catch (err) { console.error('Logo reset failed:', err); }
+                              }}
+                            >Reset</button>
+                          )}
+                        </div>
+                      </div>
+                      <span className="field-descriptor">PNG, JPG, SVG or WebP, max 256KB</span>
+                    </div>
+
+                    {/* Bound Services Card */}
+                    {boundServices && Object.keys(boundServices).length > 0 && (
+                      <div className="config-card">
+                        <div className="config-card-title">Services</div>
+                        {Object.entries(boundServices).map(([key, value]) => (
+                          <div className="config-card-row" key={key}>
+                            <span className="config-card-label">{key}</span>
+                            <span className="config-card-value mono">{value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div></div>
                 )}
               </section>
             )}
@@ -4155,18 +4428,18 @@ function App() {
                   <h2>
                     User Management
                     {nodeName && <span className="node-badge">Node: {nodeName}</span>}
-                    {dbUsers.length > 0 && <span className="count-badge">{dbUsers.length}</span>}
+                    {dbUsersPagination && <span className="count-badge">{dbUsersPagination.total}</span>}
                   </h2>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <div className="admin-flex-row">
                     <button
                       onClick={() => { fetchCantonUsers(); setShowPartiesModal(true); }}
-                      className="send-btn admin-btn"
+                      className="admin-btn-primary"
                     >
                       Canton Parties
                     </button>
                     <button
                       onClick={() => fetchDbUsers()}
-                      className="refresh-btn"
+                      className="admin-btn-ghost"
                       disabled={adminLoading}
                     >
                       {adminLoading ? 'Loading...' : 'Refresh'}
@@ -4174,55 +4447,104 @@ function App() {
                   </div>
                 </div>
 
-                <div className="admin-users-table user-mgmt-table">
-                <div className="admin-table-header">
-                  <span>Username</span>
-                  <span>Display Name</span>
-                  <span>Party ID</span>
-                  <span>Actions</span>
+                <div className="admin-search-bar">
+                  <input
+                    type="text"
+                    placeholder="Search users by name or party ID..."
+                    value={dbUsersSearch}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setDbUsersSearch(val);
+                      setDbUsersPage(0);
+                      // Debounce search
+                      if ((window as any).__dbUserSearchTimer) clearTimeout((window as any).__dbUserSearchTimer);
+                      (window as any).__dbUserSearchTimer = setTimeout(() => fetchDbUsers(val, 0), 300);
+                    }}
+                    className="input-sm"
+                  />
                 </div>
-                {dbUsers.length === 0 ? (
-                  <div className="no-transactions">No users found</div>
-                ) : (
-                  dbUsers.map((user) => (
-                    <div key={user.id} className="admin-table-row">
-                      <span className="admin-cell">{user.username}</span>
-                      <span className="admin-cell">{user.display_name}</span>
-                      <span className="admin-cell party-id-cell" title={user.party_id || ''}>
-                        {user.party_id || 'Not linked'}
-                      </span>
-                      <span className="admin-cell">
-                        <div className="action-buttons">
-                          <button
-                            onClick={() => handleAdminTapFaucet(user.username)}
-                            className="btn-edit"
-                            title="Add 100 CC to this user"
-                          >
-                            Faucet
-                          </button>
-                          <button
-                            onClick={async () => {
-                              if (appsList.length === 0) await fetchApps();
-                              if (Object.keys(appAccessMap).length === 0) await fetchAppAccess();
-                              setUserAppAccessModalUser(user);
-                            }}
-                            className="btn-edit"
-                            title="Manage app access"
-                          >
-                            Apps
-                          </button>
-                          <button
-                            onClick={() => handleDeleteUser(user.id)}
-                            className="btn-delete"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </span>
+
+                <div className="admin-users-table">
+                  <div className="rpc-table-container">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Username</th>
+                          <th>Display Name</th>
+                          <th>Party ID</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dbUsers.length === 0 ? (
+                          <tr><td colSpan={4} className="no-transactions">{adminLoading ? 'Loading...' : 'No users found'}</td></tr>
+                        ) : (
+                          dbUsers.map((user) => (
+                            <tr key={user.id}>
+                              <td data-label="Username">{user.username}</td>
+                              <td data-label="Display Name">{user.display_name}</td>
+                              <td data-label="Party ID" className="party-id-cell" title={user.party_id || ''}>
+                                {user.party_id || 'Not linked'}
+                              </td>
+                              <td data-label="Actions">
+                                <div className="action-buttons">
+                                  <button
+                                    onClick={() => handleAdminTapFaucet(user.username)}
+                                    className="admin-btn-secondary admin-btn-sm"
+                                    title="Add 100 CC to this user"
+                                  >
+                                    Faucet
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      if (appsList.length === 0) await fetchApps();
+                                      if (Object.keys(appAccessMap).length === 0) await fetchAppAccess();
+                                      setUserAppAccessModalUser(user);
+                                    }}
+                                    className="admin-btn-secondary admin-btn-sm"
+                                    title="Manage app access"
+                                  >
+                                    Apps
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteUser(user.id)}
+                                    className="admin-btn-danger admin-btn-sm"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {dbUsersPagination && dbUsersPagination.total > 50 && (
+                  <div className="admin-pagination">
+                    <span className="admin-pagination-info">
+                      Showing {dbUsersPagination.offset + 1}-{Math.min(dbUsersPagination.offset + dbUsersPagination.limit, dbUsersPagination.total)} of {dbUsersPagination.total}
+                    </span>
+                    <div className="admin-flex-row">
+                      <button
+                        onClick={() => { const p = dbUsersPage - 1; setDbUsersPage(p); fetchDbUsers(undefined, p); }}
+                        disabled={dbUsersPage === 0 || adminLoading}
+                        className="admin-btn-secondary admin-btn-sm"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        onClick={() => { const p = dbUsersPage + 1; setDbUsersPage(p); fetchDbUsers(undefined, p); }}
+                        disabled={!dbUsersPagination.hasMore || adminLoading}
+                        className="admin-btn-secondary admin-btn-sm"
+                      >
+                        Next
+                      </button>
                     </div>
-                  ))
+                  </div>
                 )}
-                </div>
               </section>
             )}
 
@@ -4231,7 +4553,7 @@ function App() {
               <div className="modal-overlay" onClick={() => setUserAppAccessModalUser(null)}>
                 <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
                   <h2>App Access: {userAppAccessModalUser.display_name || userAppAccessModalUser.username}</h2>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  <p className="admin-description">
                     Toggle which apps this user can access. Apps with no users assigned are visible to everyone.
                   </p>
                   <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
@@ -4259,9 +4581,9 @@ function App() {
                             </label>
                             <span
                               className="app-icon-preview"
-                              style={{ backgroundColor: app.color, width: '28px', height: '28px', fontSize: '14px' }}
+                              style={{ width: '28px', height: '28px', fontSize: '14px' }}
                             >
-                              {app.icon}
+                              <AppFavicon url={app.url} icon={app.icon} name={app.name} size={16} />
                             </span>
                             <div>
                               <strong>{app.name}</strong>
@@ -4275,7 +4597,7 @@ function App() {
                     )}
                   </div>
                   <div className="modal-buttons" style={{ marginTop: '1rem' }}>
-                    <button onClick={() => setUserAppAccessModalUser(null)} className="refresh-btn">
+                    <button onClick={() => setUserAppAccessModalUser(null)} className="admin-btn-ghost">
                       Close
                     </button>
                   </div>
@@ -4289,8 +4611,8 @@ function App() {
                 <div className="settings-window" style={{ maxWidth: '600px' }} onClick={(e) => e.stopPropagation()}>
                   <div className="app-window-header">
                     <div className="app-window-title">Canton Parties {cantonUsers.length > 0 && <span className="count-badge">{cantonUsers.length}</span>}</div>
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                      <button onClick={() => setShowCreateUser(true)} className="send-btn admin-btn" style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}>+ New Party</button>
+                    <div className="admin-flex-row">
+                      <button onClick={() => setShowCreateUser(true)} className="admin-btn-primary admin-btn-sm">+ New Party</button>
                       <button className="app-window-close" onClick={() => setShowPartiesModal(false)}>✕</button>
                     </div>
                   </div>
@@ -4329,7 +4651,7 @@ function App() {
                   </h2>
                   <button
                     onClick={() => setShowCreateCode(true)}
-                    className="send-btn admin-btn"
+                    className="admin-btn-primary"
                   >
                     + New Code
                   </button>
@@ -4341,62 +4663,68 @@ function App() {
                   ) : registrationCodes.length === 0 ? (
                     <div className="no-transactions">No registration codes found</div>
                   ) : (
-                    <div className="admin-users-table">
-                      <div className="admin-table-header">
-                        <span>Code</span>
-                        <span>Type</span>
-                        <span>Uses</span>
-                        <span>Status</span>
-                      <span>Actions</span>
-                    </div>
-                    {registrationCodes.map((code) => (
-                      <div key={code.id} className="admin-table-row">
-                        <span className="admin-cell">
-                          <code style={{ fontFamily: 'monospace', fontWeight: 'bold' }}>{code.code}</code>
-                        </span>
-                        <span className="admin-cell">
-                          {code.codeType === 'reserved_username' ? (
-                            <span>
-                              <span style={{ background: 'rgba(99, 102, 241, 0.15)', color: 'var(--accent-primary)', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem' }}>Reserved</span>
-                              {code.reservedUsername && (
-                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{code.reservedUsername}</div>
-                              )}
-                            </span>
-                          ) : (
-                            <span style={{ background: 'rgba(40, 167, 69, 0.15)', color: '#28a745', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem' }}>General</span>
-                          )}
-                        </span>
-                        <span className="admin-cell">
-                          {code.maxUses - code.usesRemaining} / {code.maxUses}
-                        </span>
-                        <span className="admin-cell">
-                          {code.isDepleted ? (
-                            <span style={{ color: '#dc3545' }}>Depleted</span>
-                          ) : code.isExpired ? (
-                            <span style={{ color: '#dc3545' }}>Expired</span>
-                          ) : (
-                            <span style={{ color: '#28a745' }}>Active</span>
-                          )}
-                        </span>
-                        <span className="admin-cell">
-                          <div className="action-buttons">
-                            <button
-                              onClick={() => copyCodeUrl(code.code)}
-                              className="btn-edit"
-                              title="Copy registration URL"
-                            >
-                              Copy URL
-                            </button>
-                            <button
-                              onClick={() => handleDeleteCode(code.id)}
-                              className="btn-delete"
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </span>
-                      </div>
-                    ))}
+                    <div className="rpc-table-container">
+                      <table className="admin-table">
+                        <thead>
+                          <tr>
+                            <th>Code</th>
+                            <th>Type</th>
+                            <th>Uses</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {registrationCodes.map((code) => (
+                            <tr key={code.id}>
+                              <td data-label="Code">
+                                <code className="admin-code-mono">{code.code}</code>
+                              </td>
+                              <td data-label="Type">
+                                {code.codeType === 'reserved_username' ? (
+                                  <span>
+                                    <span className="code-badge-reserved">Reserved</span>
+                                    {code.reservedUsername && (
+                                      <div className="code-reserved-username">{code.reservedUsername}</div>
+                                    )}
+                                  </span>
+                                ) : (
+                                  <span className="code-badge-general">General</span>
+                                )}
+                              </td>
+                              <td data-label="Uses">
+                                {code.maxUses - code.usesRemaining} / {code.maxUses}
+                              </td>
+                              <td data-label="Status">
+                                {code.isDepleted ? (
+                                  <span className="status-depleted">Depleted</span>
+                                ) : code.isExpired ? (
+                                  <span className="status-depleted">Expired</span>
+                                ) : (
+                                  <span className="status-active">Active</span>
+                                )}
+                              </td>
+                              <td data-label="Actions">
+                                <div className="action-buttons">
+                                  <button
+                                    onClick={() => copyCodeUrl(code.code)}
+                                    className="admin-btn-secondary admin-btn-sm"
+                                    title="Copy registration URL"
+                                  >
+                                    Copy URL
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteCode(code.id)}
+                                    className="admin-btn-danger admin-btn-sm"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   )}
                 </div>
@@ -4409,18 +4737,17 @@ function App() {
                 <div className="settings-window" style={{ maxWidth: '600px' }} onClick={(e) => e.stopPropagation()}>
                   <div className="app-window-header">
                     <div className="app-window-title">Daml Packages {packageIds.length > 0 && <span className="count-badge">{packageIds.length}</span>}</div>
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <div className="admin-flex-row">
                       <button
                         onClick={() => setShowInstallFromUrl(true)}
-                        className="send-btn admin-btn"
+                        className="admin-btn-primary admin-btn-sm"
                         disabled={darUploading}
-                        style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}
                       >
                         Install from URL
                       </button>
                       <label
-                        className="send-btn admin-btn"
-                        style={{ cursor: darUploading ? 'not-allowed' : 'pointer', fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}
+                        className="admin-btn-primary admin-btn-sm"
+                        style={{ cursor: darUploading ? 'not-allowed' : 'pointer' }}
                       >
                         {darUploading ? 'Uploading...' : '+ Upload DAR'}
                         <input
@@ -4440,7 +4767,7 @@ function App() {
                       <div className="modal-backdrop" onClick={() => setShowInstallFromUrl(false)}>
                         <div className="modal-content" onClick={(e) => e.stopPropagation()}>
                           <h3>Install DAR from URL</h3>
-                          <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                          <p className="admin-description-text" style={{ marginBottom: '1rem' }}>
                             Enter the base URL of the app. The DAR will be fetched from <code>/api/package</code>.
                           </p>
                           <div className="form-group">
@@ -4466,7 +4793,7 @@ function App() {
                             </button>
                             <button
                               onClick={handleDarInstallFromUrl}
-                              className="send-btn admin-btn"
+                              className="admin-btn-primary"
                               disabled={darUploading || !darInstallUrl.trim()}
                             >
                               {darUploading ? 'Installing...' : 'Install'}
@@ -4518,9 +4845,9 @@ function App() {
               <section className="admin-card">
                 <div className="admin-card-header">
                   <h2>RPC Endpoints</h2>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                  <div className="admin-flex-row" style={{ gap: '1rem' }}>
                     {/* Network Toggle */}
-                    <div className="rpc-network-toggle" style={{ marginRight: '0.5rem' }}>
+                    <div className="rpc-network-toggle">
                       <button
                         className={`toggle-btn ${rpcNetworkMode === 'mainnet' ? 'active' : ''}`}
                         onClick={() => setRpcNetworkMode('mainnet')}
@@ -4555,7 +4882,7 @@ function App() {
                           }
                           setShowAddRpc(true);
                         }}
-                        className="send-btn admin-btn"
+                        className="admin-btn-primary"
                       >
                         + Add RPC
                       </button>
@@ -4572,7 +4899,7 @@ function App() {
                     const filteredEndpoints = rpcEndpoints.filter(ep => ep.network === rpcNetworkMode);
                     return (
                     <div className="rpc-table-container">
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+                      <p className="admin-description-text">
                         Showing {filteredEndpoints.length} {rpcNetworkMode} endpoint{filteredEndpoints.length !== 1 ? 's' : ''}
                       </p>
                       <table className="admin-table">
@@ -4590,18 +4917,18 @@ function App() {
                         <tbody>
                           {filteredEndpoints.map(ep => (
                               <tr key={ep.id} className={ep.is_enabled === 0 ? 'disabled-row' : ''}>
-                                <td>
+                                <td data-label="Chain">
                                   <span className="chain-badge" title={ep.chain_type.toUpperCase()}>{ep.chain_name || ep.chain_type.toUpperCase()}</span>
                                 </td>
-                                <td>{ep.chain_id || '-'}</td>
-                                <td>{ep.name || '-'}</td>
-                                <td>
+                                <td data-label="Chain ID">{ep.chain_id || '-'}</td>
+                                <td data-label="Provider">{ep.name || '-'}</td>
+                                <td data-label="RPC URL">
                                   <code className="rpc-url-cell" title={ep.rpc_url}>
                                     {ep.rpc_url.length > 45 ? ep.rpc_url.slice(0, 45) + '...' : ep.rpc_url}
                                   </code>
                                 </td>
-                                <td>{ep.priority}</td>
-                                <td>
+                                <td data-label="Priority">{ep.priority}</td>
+                                <td data-label="Status">
                                   <button
                                     onClick={() => handleToggleRpcEnabled(ep)}
                                     className={`status-badge ${ep.is_enabled ? 'enabled' : 'disabled'}`}
@@ -4611,18 +4938,18 @@ function App() {
                                   </button>
                                 </td>
                                 {superadminUser.isSuperadmin && (
-                                  <td>
+                                  <td data-label="Actions">
                                     <div className="action-buttons">
                                       <button
                                         onClick={() => setEditingRpc(ep)}
-                                        className="btn-edit"
+                                        className="admin-btn-secondary admin-btn-sm"
                                         title="Edit"
                                       >
                                         Edit
                                       </button>
                                       <button
                                         onClick={() => handleDeleteRpc(ep.id)}
-                                        className="btn-delete"
+                                        className="admin-btn-danger admin-btn-sm"
                                         title="Delete"
                                       >
                                         Delete
@@ -4718,10 +5045,10 @@ function App() {
                       <small>Lower = higher priority (0 = primary)</small>
                     </div>
                     <div className="modal-buttons">
-                      <button type="button" onClick={() => setShowAddRpc(false)} className="refresh-btn">
+                      <button type="button" onClick={() => setShowAddRpc(false)} className="admin-btn-ghost">
                         Cancel
                       </button>
-                      <button type="submit" className="send-btn admin-btn">
+                      <button type="submit" className="admin-btn-primary">
                         Add Endpoint
                       </button>
                     </div>
@@ -4801,10 +5128,10 @@ function App() {
                       />
                     </div>
                     <div className="modal-buttons">
-                      <button type="button" onClick={() => setEditingRpc(null)} className="refresh-btn">
+                      <button type="button" onClick={() => setEditingRpc(null)} className="admin-btn-ghost">
                         Cancel
                       </button>
-                      <button type="submit" className="send-btn admin-btn">
+                      <button type="submit" className="admin-btn-primary">
                         Update Endpoint
                       </button>
                     </div>
@@ -4821,7 +5148,7 @@ function App() {
                   {superadminUser.isSuperadmin && (
                     <button
                       onClick={() => setShowAddApp(true)}
-                      className="send-btn admin-btn"
+                      className="admin-btn-primary"
                     >
                       + Add App
                     </button>
@@ -4829,7 +5156,7 @@ function App() {
                 </div>
 
                 <div className="section-content">
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  <p className="admin-description">
                     Apps added here will appear in the dock. URLs are automatically allowed as iframe origins.
                   </p>
                   {appsLoading ? (
@@ -4856,16 +5183,13 @@ function App() {
                             const accessCount = appAccessMap[app.id]?.length || 0;
                             return (
                             <tr key={app.id} className={app.is_enabled === 0 ? 'disabled-row' : ''}>
-                              <td>
-                                <span
-                                  className="app-icon-preview"
-                                  style={{ backgroundColor: app.color }}
-                                >
-                                  {app.icon}
+                              <td data-label="Icon">
+                                <span className="app-icon-preview">
+                                  <AppFavicon url={app.url} icon={app.icon} name={app.name} />
                                 </span>
                               </td>
-                              <td>{app.name}</td>
-                              <td>
+                              <td data-label="Name">{app.name}</td>
+                              <td data-label="URL">
                                 {app.url ? (
                                   <code className="rpc-url-cell" title={app.url}>
                                     {app.url.length > 40 ? app.url.slice(0, 40) + '...' : app.url}
@@ -4874,8 +5198,8 @@ function App() {
                                   <span style={{ color: 'var(--text-secondary)' }}>Built-in</span>
                                 )}
                               </td>
-                              <td>{app.sort_order}</td>
-                              <td>
+                              <td data-label="Order">{app.sort_order}</td>
+                              <td data-label="Status">
                                 <button
                                   onClick={() => handleToggleAppEnabled(app)}
                                   className={`status-badge ${app.is_enabled ? 'enabled' : 'disabled'}`}
@@ -4885,7 +5209,7 @@ function App() {
                                 </button>
                               </td>
                               {superadminUser.isSuperadmin && (
-                                <td>
+                                <td data-label="Access">
                                   <button
                                     onClick={() => setAppAccessModalApp(app)}
                                     className={`status-badge ${accessCount > 0 ? 'enabled' : ''}`}
@@ -4897,7 +5221,7 @@ function App() {
                                 </td>
                               )}
                               {superadminUser.isSuperadmin && (
-                                <td>
+                                <td data-label="Actions">
                                   <div className="action-buttons">
                                     {app.url && (
                                       pkgStatus?.status === 'na' ? (
@@ -4935,14 +5259,14 @@ function App() {
                                     )}
                                     <button
                                       onClick={() => setEditingApp(app)}
-                                      className="btn-edit"
+                                      className="admin-btn-secondary admin-btn-sm"
                                       title="Edit"
                                     >
                                       Edit
                                     </button>
                                     <button
                                       onClick={() => handleDeleteApp(app.id)}
-                                      className="btn-delete"
+                                      className="admin-btn-danger admin-btn-sm"
                                       title="Delete"
                                     >
                                       Delete
@@ -5053,10 +5377,10 @@ function App() {
                       <small>Lower numbers appear first</small>
                     </div>
                     <div className="modal-buttons">
-                      <button type="button" onClick={() => setShowAddApp(false)} className="refresh-btn">
+                      <button type="button" onClick={() => setShowAddApp(false)} className="admin-btn-ghost">
                         Cancel
                       </button>
-                      <button type="submit" className="send-btn admin-btn">
+                      <button type="submit" className="admin-btn-primary">
                         Add App
                       </button>
                     </div>
@@ -5149,10 +5473,10 @@ function App() {
                       />
                     </div>
                     <div className="modal-buttons">
-                      <button type="button" onClick={() => setEditingApp(null)} className="refresh-btn">
+                      <button type="button" onClick={() => setEditingApp(null)} className="admin-btn-ghost">
                         Cancel
                       </button>
-                      <button type="submit" className="send-btn admin-btn">
+                      <button type="submit" className="admin-btn-primary">
                         Update App
                       </button>
                     </div>
@@ -5177,7 +5501,7 @@ function App() {
               <div className="modal-overlay" onClick={() => { setAppAccessModalApp(null); setAppAccessSearch(''); }}>
                 <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
                   <h2>App Access: {appAccessModalApp.name}</h2>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                  <p className="admin-description">
                     {assignedUsers.length === 0
                       ? 'No users assigned — this app is visible to everyone.'
                       : `${assignedUsers.length} user${assignedUsers.length !== 1 ? 's' : ''} assigned. Only these users can see this app.`}
@@ -5194,40 +5518,24 @@ function App() {
                       autoFocus
                     />
                     {suggestions.length > 0 && (
-                      <div style={{
-                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
-                        background: 'var(--card-bg)', border: '1px solid var(--border-color)',
-                        borderRadius: '8px', marginTop: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                        maxHeight: '200px', overflowY: 'auto'
-                      }}>
+                      <div className="autocomplete-dropdown">
                         {suggestions.map(user => (
                           <button
                             key={user.id}
+                            className="autocomplete-item"
                             onClick={() => {
                               handleGrantAppAccess(user.id, appAccessModalApp.id);
                               setAppAccessSearch('');
                             }}
-                            style={{
-                              display: 'block', width: '100%', padding: '0.5rem 0.75rem',
-                              background: 'transparent', border: 'none', textAlign: 'left',
-                              cursor: 'pointer', color: 'var(--text-primary)', fontSize: '0.85rem'
-                            }}
-                            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--accent-bg-hover)')}
-                            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                           >
                             <strong>{user.display_name || user.username}</strong>
-                            <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem' }}>@{user.username}</span>
+                            <span className="autocomplete-item-meta">@{user.username}</span>
                           </button>
                         ))}
                       </div>
                     )}
                     {searchLower.length > 0 && suggestions.length === 0 && (
-                      <div style={{
-                        position: 'absolute', top: '100%', left: 0, right: 0,
-                        background: 'var(--card-bg)', border: '1px solid var(--border-color)',
-                        borderRadius: '8px', marginTop: '4px', padding: '0.5rem 0.75rem',
-                        color: 'var(--text-secondary)', fontSize: '0.85rem'
-                      }}>
+                      <div className="autocomplete-dropdown autocomplete-empty">
                         No matching users found
                       </div>
                     )}
@@ -5248,8 +5556,7 @@ function App() {
                           </div>
                           <button
                             onClick={() => handleRevokeAppAccess(user.user_id, appAccessModalApp.id)}
-                            className="btn-delete"
-                            style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                            className="admin-btn-danger admin-btn-sm"
                           >
                             Remove
                           </button>
@@ -5259,7 +5566,7 @@ function App() {
                   </div>
 
                   <div className="modal-buttons" style={{ marginTop: '1rem' }}>
-                    <button onClick={() => { setAppAccessModalApp(null); setAppAccessSearch(''); }} className="refresh-btn">
+                    <button onClick={() => { setAppAccessModalApp(null); setAppAccessSearch(''); }} className="admin-btn-ghost">
                       Close
                     </button>
                   </div>
@@ -5328,11 +5635,11 @@ function App() {
                       setNewAdminDisplayName('');
                       setNewAdminIsSuperadmin(false);
                     }}
-                    className="refresh-btn"
+                    className="admin-btn-ghost"
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="send-btn admin-btn">
+                  <button type="submit" className="admin-btn-primary">
                     Create Admin
                   </button>
                 </div>
@@ -5377,11 +5684,11 @@ function App() {
                       setNewDisplayName('');
                       setCreateUserStatus('');
                     }}
-                    className="refresh-btn"
+                    className="admin-btn-ghost"
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="send-btn admin-btn">
+                  <button type="submit" className="admin-btn-primary">
                     Create Party
                   </button>
                 </div>
@@ -5457,11 +5764,11 @@ function App() {
                       setNewCodeReservedUsername('');
                       setCreateCodeStatus('');
                     }}
-                    className="refresh-btn"
+                    className="admin-btn-ghost"
                   >
                     Cancel
                   </button>
-                  <button type="submit" className="send-btn admin-btn">
+                  <button type="submit" className="admin-btn-primary">
                     Create Code
                   </button>
                 </div>
@@ -5493,6 +5800,14 @@ function App() {
       <div className={`app theme-${theme}`}>
         <div className="login-container">
           <div className="login-card">
+            {authLoading && (
+              <div className="login-loading-overlay">
+                <div className="login-loading-spinner" />
+                <div className="login-loading-text">
+                  {authMode === 'register' ? 'Creating your account and generating wallets...' : 'Authenticating...'}
+                </div>
+              </div>
+            )}
             <div className="login-logo">
               <img src={customLogo || '/logo.png'} alt={orgName} />
             </div>
@@ -5626,12 +5941,20 @@ function App() {
           onAcceptOffer={handleAcceptOffer}
           onScannedAddressUsed={() => setTransferTo('')}
           onTransfer={async (to, amount, asset, chain) => {
+            console.log('[Transfer] Starting:', { to, amount, symbol: asset?.symbol, chain, chainType: asset?.chainType });
             try {
               // Determine chain type from asset or chain parameter
               const chainType = asset?.chainType || (chain ? chainAddresses.find(a => a.chain === chain)?.chain : null);
+              console.log('[Transfer] Resolved chainType:', chainType);
 
               // Canton Coin - use Splice API
               if (!asset || asset.symbol === 'CC' || chainType === 'canton') {
+                // Require PRF passkey authentication before CC transfer
+                const prfResult = await requestPrfAuthentication();
+                if (!prfResult) {
+                  return { success: false, message: 'Passkey authentication required for transfers' };
+                }
+
                 const response = await fetch(`${API_BASE}/api/wallet/transfer`, {
                   method: 'POST',
                   headers: {
@@ -5656,11 +5979,6 @@ function App() {
               }
 
               // Non-Canton tokens - use chain signers with PRF authentication
-              const prfOutput = await requestPrfAuthentication();
-              if (!prfOutput) {
-                return { success: false, message: 'Passkey authentication required for signing' };
-              }
-
               // For multi-chain assets, look up chainType from the selected chain
               let assetChainType = asset.chainType || 'evm';
               if (chain && asset.chains && asset.chains.length > 0) {
@@ -5669,22 +5987,41 @@ function App() {
                   assetChainType = selectedChainInfo.chainType;
                 }
               }
-              const keyRes = await fetch(`${API_BASE}/api/wallet/private-key?chainType=${assetChainType}`, {
-                headers: { 'Authorization': `Bearer ${sessionId}` }
-              });
-              const keyData = await keyRes.json() as ApiResponse<{ encryptedKey: string }>;
-              if (!keyData.success || !keyData.data) {
-                return { success: false, message: 'Failed to get encrypted key' };
-              }
 
-              const privateKey = await decryptPrivateKey(prfOutput, keyData.data.encryptedKey);
+              const { privateKey, ctx } = await getSigningContext(assetChainType);
               const amountNum = parseFloat(amount);
+
+              // Helper to record transaction after successful send
+              const txChain = chain || asset.chain || (asset.chains && asset.chains.length > 0 ? asset.chains[0].chain : assetChainType);
+              const recordTx = async (txHash: string | undefined, fromAddr: string, fee?: string, feeAsset?: string) => {
+                try {
+                  const resp = await fetch(`${API_BASE}/api/wallet/record-transaction`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionId}` },
+                    body: JSON.stringify({
+                      txHash, txType: 'send', assetSymbol: asset.symbol, chain: txChain, chainType: assetChainType,
+                      amount: amount, fromAddress: fromAddr, toAddress: to, fee, feeAsset
+                    })
+                  });
+                  if (!resp.ok) {
+                    console.error('Record transaction failed:', resp.status);
+                  }
+                } catch (e) {
+                  console.error('Failed to record transaction:', e);
+                }
+              };
+
+              // Network-aware mappings (same as fetchChainBalances)
+              const evmChainId = networkMode === 'mainnet' ? (chain === 'Base' ? 8453 : 1) : (chain === 'Base' ? 84532 : 11155111);
+              const btcNetwork = networkMode === 'mainnet' ? 'mainnet' : 'testnet';
+              const solNetwork = networkMode === 'mainnet' ? 'mainnet' : 'devnet';
+              const tronNetwork = networkMode === 'mainnet' ? 'mainnet' : 'shasta';
+              const tonNetwork = networkMode === 'mainnet' ? 'mainnet' : 'testnet';
 
               // Route to appropriate chain signer
               switch (assetChainType) {
                 case 'evm': {
-                  // Get chain ID (default to Ethereum mainnet)
-                  const chainId = chain === 'Base' ? 8453 : 1;
+                  const chainId = evmChainId;
                   const evmAddr = chainAddresses.find(a => a.chain === 'Ethereum')?.address;
                   if (!evmAddr) {
                     return { success: false, message: 'No EVM wallet found' };
@@ -5698,9 +6035,11 @@ function App() {
                   const result = await evmSigner.signAndSendTransaction(
                     { to, value: '0x' + weiAmount.toString(16), chainId },
                     privateKey,
-                    evmAddr
+                    evmAddr,
+                    ctx
                   );
-                  loadWalletData(true);
+                  await recordTx(result.transactionHash, evmAddr, undefined, 'ETH');
+                  await loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.transactionHash}` };
                 }
                 case 'btc': {
@@ -5711,17 +6050,18 @@ function App() {
                   const satoshis = Math.floor(amountNum * 1e8);
                   const fee = 1000; // satoshis
                   // Check balance before sending
-                  const btcBalance = await btcSigner.getBalance(btcAddr, 'mainnet');
+                  const btcBalance = await btcSigner.getBalance(btcAddr, btcNetwork);
                   if (btcBalance < satoshis + fee) {
                     return { success: false, message: `Insufficient BTC balance. Have: ${(btcBalance / 1e8).toFixed(8)} BTC` };
                   }
-                  const utxos = await btcSigner.getUTXOs(btcAddr, 'mainnet');
+                  const utxos = await btcSigner.getUTXOs(btcAddr, btcNetwork);
                   if (utxos.length === 0) {
                     return { success: false, message: 'No UTXOs available' };
                   }
                   const result = await btcSigner.signAndSendTransaction(
-                    utxos, to, satoshis, privateKey, btcAddr, fee, 'mainnet'
+                    utxos, to, satoshis, privateKey, btcAddr, fee, btcNetwork, ctx
                   );
+                  await recordTx(result.txid, btcAddr, (fee / 1e8).toFixed(8), 'BTC');
                   loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.txid}` };
                 }
@@ -5736,7 +6076,7 @@ function App() {
 
                   if (isNativeSol) {
                     // Native SOL transfer
-                    const solBalance = await solSigner.getBalance(solAddr, 'mainnet');
+                    const solBalance = await solSigner.getBalance(solAddr, solNetwork);
                     const lamports = Math.floor(amountNum * 1e9);
                     const fee = 5000; // transaction fee
                     const rentExemptMin = 890880; // minimum rent-exempt balance (~0.00089 SOL)
@@ -5746,23 +6086,22 @@ function App() {
                       const maxSendable = Math.max(0, solBalance - fee - rentExemptMin) / 1e9;
                       return { success: false, message: `Insufficient SOL. Balance: ${(solBalance / 1e9).toFixed(6)} SOL. Max sendable: ${maxSendable.toFixed(6)} SOL (need to keep ~0.00089 SOL for rent)` };
                     }
-                    const result = await solSigner.signAndSendTransaction(to, lamports, privateKey, 'mainnet');
+                    const result = await solSigner.signAndSendTransaction(to, lamports, privateKey, solNetwork, ctx);
+                    await recordTx(result.signature, solAddr, undefined, 'SOL');
                     loadWalletData(true);
                     return { success: true, message: `Success! TX: ${result.signature}` };
                   } else {
                     // SPL Token transfer (USDC, USDT, etc.)
-                    // Get token mint address from asset chains
                     const chainInfo = asset.chains?.find(c => c.chain === 'Solana' || c.chainType === 'svm');
                     const mintAddress = chainInfo?.contractAddress;
                     if (!mintAddress) {
                       return { success: false, message: `No Solana contract address found for ${asset.symbol}` };
                     }
 
-                    // Get token decimals (default to 6 for USDC/USDT)
                     const decimals = chainInfo?.decimals || 6;
 
                     // Check token balance
-                    const tokenBalance = await solSigner.getTokenBalance(mintAddress, solAddr, 'mainnet');
+                    const tokenBalance = await solSigner.getTokenBalance(mintAddress, solAddr, solNetwork);
                     const tokenAmount = BigInt(Math.floor(amountNum * Math.pow(10, decimals)));
 
                     if (tokenBalance < tokenAmount) {
@@ -5770,13 +6109,14 @@ function App() {
                     }
 
                     // Also need some SOL for transaction fees
-                    const solBalance = await solSigner.getBalance(solAddr, 'mainnet');
+                    const solBalance = await solSigner.getBalance(solAddr, solNetwork);
                     const minSolForFee = 10000; // ~0.00001 SOL for fee
                     if (solBalance < minSolForFee) {
                       return { success: false, message: `Insufficient SOL for transaction fee. Need at least 0.00001 SOL` };
                     }
 
-                    const result = await solSigner.signAndSendTokenTransfer(to, tokenAmount, mintAddress, privateKey, decimals, 'mainnet');
+                    const result = await solSigner.signAndSendTokenTransfer(to, tokenAmount, mintAddress, privateKey, decimals, solNetwork, ctx);
+                    await recordTx(result.signature, solAddr, undefined, 'SOL');
                     loadWalletData(true);
                     return { success: true, message: `Success! TX: ${result.signature}` };
                   }
@@ -5788,11 +6128,12 @@ function App() {
                   }
                   const sun = Math.floor(amountNum * 1e6);
                   // Check balance before sending
-                  const trxBalance = await tronSigner.getBalance(tronAddr, 'mainnet');
+                  const trxBalance = await tronSigner.getBalance(tronAddr, tronNetwork);
                   if (trxBalance < sun) {
                     return { success: false, message: `Insufficient TRX balance. Have: ${(trxBalance / 1e6).toFixed(6)} TRX` };
                   }
-                  const result = await tronSigner.signAndSendTransaction(to, sun, privateKey, 'mainnet');
+                  const result = await tronSigner.signAndSendTransaction(to, sun, privateKey, tronNetwork, ctx);
+                  await recordTx(result.txID, tronAddr, undefined, 'TRX');
                   loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.txID}` };
                 }
@@ -5803,11 +6144,12 @@ function App() {
                   }
                   const nanotons = BigInt(Math.floor(amountNum * 1e9));
                   // Check balance before sending
-                  const tonBalance = await tonSigner.getBalance(tonAddr, 'mainnet');
+                  const tonBalance = await tonSigner.getBalance(tonAddr, tonNetwork);
                   if (tonBalance < nanotons) {
                     return { success: false, message: `Insufficient TON balance. Have: ${(Number(tonBalance) / 1e9).toFixed(6)} TON` };
                   }
-                  const result = await tonSigner.signAndSendTransaction(to, nanotons, privateKey, undefined, 'mainnet');
+                  const result = await tonSigner.signAndSendTransaction(to, nanotons, privateKey, undefined, tonNetwork, ctx);
+                  await recordTx(result.hash, tonAddr, undefined, 'TON');
                   loadWalletData(true);
                   return { success: true, message: `Success! TX: ${result.hash}` };
                 }
@@ -6118,8 +6460,15 @@ function App() {
         className="dock-trigger"
         onMouseEnter={() => setDockVisible(true)}
       />
+      <button
+        className="mobile-dock-toggle"
+        onClick={() => setMobileDockOpen(!mobileDockOpen)}
+        title={mobileDockOpen ? 'Hide apps' : 'Show apps'}
+      >
+        {mobileDockOpen ? <X size={20} /> : <LayoutGrid size={20} />}
+      </button>
       <div
-        className={`dock-container ${dockVisible ? 'visible' : ''}`}
+        className={`dock-container ${dockVisible ? 'visible' : ''} ${mobileDockOpen ? 'mobile-visible' : ''}`}
         onMouseLeave={() => setDockVisible(false)}
       >
         <div className="dock">
@@ -6130,7 +6479,7 @@ function App() {
               <div
                 key={app.id}
                 className={`dock-item ${hoveredApp === app.id ? 'hovered' : ''} ${isActive ? 'active' : ''} ${hasSession ? 'has-session' : ''}`}
-                style={{ '--app-color': app.color, '--item-index': index } as React.CSSProperties}
+                style={{ '--item-index': index } as React.CSSProperties}
                 onMouseEnter={() => setHoveredApp(app.id)}
                 onMouseLeave={() => setHoveredApp(null)}
                 onClick={() => {
@@ -6148,7 +6497,7 @@ function App() {
                 }}
               >
                 <div className="dock-icon">
-                  <span>{app.icon}</span>
+                  <AppFavicon url={app.url} icon={app.icon} name={app.name} />
                 </div>
                 <div className="dock-tooltip">{app.name}</div>
                 {/* Show indicator if app has active session */}
@@ -6201,7 +6550,7 @@ function App() {
                   zoomTooltipTimerRef.current = setTimeout(() => setZoomTooltipApp(null), 800);
                 } : undefined}
               >
-                <span className="app-window-icon">{app.icon}</span> {app.name}
+                <span className="app-window-icon"><AppFavicon url={app.url} icon={app.icon} name={app.name} size={16} /></span> {app.name}
                 {zoomTooltipApp === appId && (
                   <span className="app-zoom-tooltip">{appZoom[appId] || 100}%</span>
                 )}

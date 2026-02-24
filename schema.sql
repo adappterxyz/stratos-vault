@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS wallet_addresses (
   address TEXT NOT NULL,
   private_key_encrypted TEXT,  -- encrypted private key for derived wallets
   derivation_path TEXT,
+  key_type TEXT DEFAULT 'full',  -- 'full' = PRF-encrypted full key, 'mpc_share' = PRF-encrypted client share
+  mpc_key_id TEXT,  -- Durable Object name ID for server share lookup
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   UNIQUE(user_id, chain_type)
@@ -89,9 +91,10 @@ CREATE TABLE IF NOT EXISTS asset_chains (
   chain_type TEXT NOT NULL,   -- 'evm', 'tron', 'svm', 'ton', etc. (Base uses 'evm')
   contract_address TEXT,      -- Chain-specific contract address
   decimals INTEGER DEFAULT 18,
+  network TEXT NOT NULL DEFAULT 'mainnet',  -- 'mainnet' or 'testnet'
   is_enabled INTEGER DEFAULT 1,
   FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
-  UNIQUE(asset_id, chain)
+  UNIQUE(asset_id, chain, network)
 );
 
 -- User custom assets table (user-specific tokens)
@@ -243,7 +246,22 @@ CREATE TABLE IF NOT EXISTS user_app_access (
   UNIQUE(user_id, app_id)
 );
 
+-- Per-passkey encrypted keys (multi-passkey support)
+CREATE TABLE IF NOT EXISTS passkey_encrypted_keys (
+  id TEXT PRIMARY KEY,
+  passkey_id TEXT NOT NULL,
+  wallet_id TEXT NOT NULL,
+  encrypted_key TEXT NOT NULL,
+  key_type TEXT DEFAULT 'full',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (passkey_id) REFERENCES passkeys(id) ON DELETE CASCADE,
+  FOREIGN KEY (wallet_id) REFERENCES wallet_addresses(id) ON DELETE CASCADE,
+  UNIQUE(passkey_id, wallet_id)
+);
+
 -- Indexes
+CREATE INDEX IF NOT EXISTS idx_pek_passkey_id ON passkey_encrypted_keys(passkey_id);
+CREATE INDEX IF NOT EXISTS idx_pek_wallet_id ON passkey_encrypted_keys(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_user_app_access_user_id ON user_app_access(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_app_access_app_id ON user_app_access(app_id);
 CREATE INDEX IF NOT EXISTS idx_registration_codes_code ON registration_codes(code);

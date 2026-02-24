@@ -95,6 +95,7 @@ export interface CantonQueryParams {
 export interface CantonCreateParams {
   templateId: string;
   payload: Record<string, unknown>;
+  actAs?: string[];
 }
 
 export interface CantonExerciseParams {
@@ -102,6 +103,7 @@ export interface CantonExerciseParams {
   templateId: string;
   choice: string;
   argument: Record<string, unknown>;
+  actAs?: string[];
 }
 
 export interface CantonCreateResult {
@@ -264,6 +266,7 @@ export interface ConnectionState {
   connected: boolean;
   user: AuthUser | null;
   addresses: ChainAddress[];
+  network: 'mainnet' | 'testnet';
 }
 
 export interface WalletBridgeCallbacks {
@@ -272,6 +275,7 @@ export interface WalletBridgeCallbacks {
   getAssets: () => Asset[];
   getTransactions: () => Transaction[];
   getTransferOffers: () => TransferOffer[];
+  getNetwork: () => 'mainnet' | 'testnet';
   onTransferRequest: (params: {
     to: string;
     amount: string;
@@ -350,13 +354,15 @@ export interface WalletBridgeCallbacks {
   onBroadcastTronTransaction?: (params: BroadcastTronTransactionParams) => Promise<BroadcastTronTransactionResult>;
   // Canton User Rights
   onGrantUserRights?: (params: GrantUserRightsParams) => Promise<GrantUserRightsResult>;
+  // EVM Transaction Receipt
+  onGetTransactionReceipt?: (params: { txHash: string; chainId: number }) => Promise<any>;
   // Chat Agent
   onChatAgent?: (params: ChatAgentParams) => Promise<ChatAgentResult>;
 }
 
 /**
  * Allowed origins for iframe apps
- * In production, this should be a whitelist of trusted app domains
+ * Includes localhost for development plus the current window origin
  */
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
@@ -364,22 +370,23 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3002',
   'http://localhost:5173',
   'http://localhost:5174',
-  // Production app origins
-  'https://vault.cantondefi.com',
-  'https://main.stratos-rwa.pages.dev',
-];
+  // Include current origin so self-hosted apps can communicate
+  typeof window !== 'undefined' ? window.location.origin : '',
+].filter(Boolean);
 
 export class WalletBridge {
   private callbacks: WalletBridgeCallbacks;
   private allowedOrigins: string[];
   private iframeRefs: Map<string, HTMLIFrameElement> = new Map();
+  private boundHandleMessage: (event: MessageEvent) => void;
 
   constructor(callbacks: WalletBridgeCallbacks, allowedOrigins?: string[]) {
     this.callbacks = callbacks;
     this.allowedOrigins = allowedOrigins || ALLOWED_ORIGINS;
 
-    // Listen for messages from iframes
-    window.addEventListener('message', this.handleMessage.bind(this));
+    // Store bound reference so destroy() can remove the same listener
+    this.boundHandleMessage = this.handleMessage.bind(this);
+    window.addEventListener('message', this.boundHandleMessage);
   }
 
   /**
@@ -414,6 +421,10 @@ export class WalletBridge {
    * Check if origin is allowed
    */
   private isAllowedOrigin(origin: string): boolean {
+    // Always allow current window origin (self-hosted apps, service workers)
+    if (typeof window !== 'undefined' && origin === window.location.origin) {
+      return true;
+    }
     // In development, allow localhost
     if (origin.startsWith('http://localhost:')) {
       return true;
@@ -469,6 +480,7 @@ export class WalletBridge {
           connected: user !== null,
           user,
           addresses,
+          network: this.callbacks.getNetwork(),
         } as ConnectionState;
       }
 
@@ -490,6 +502,9 @@ export class WalletBridge {
         }
         return addr.address;
       }
+
+      case 'getNetwork':
+        return this.callbacks.getNetwork();
 
       case 'getAssets':
         return this.callbacks.getAssets();
@@ -652,6 +667,15 @@ export class WalletBridge {
         return this.callbacks.onGrantUserRights(grantRightsParams);
       }
 
+      // EVM Transaction Receipt
+      case 'getTransactionReceipt': {
+        if (!this.callbacks.onGetTransactionReceipt) {
+          throw new Error('Transaction receipt not supported');
+        }
+        const receiptParams = params as { txHash: string; chainId: number };
+        return this.callbacks.onGetTransactionReceipt(receiptParams);
+      }
+
       // Chat Agent
       case 'chatAgent': {
         if (!this.callbacks.onChatAgent) {
@@ -700,9 +724,17 @@ export class WalletBridge {
   /**
    * Notify apps of user changes
    */
-  notifyUserChanged(): void {
-    const user = this.callbacks.getUser();
-    this.sendEvent('userChanged', user);
+  notifyUserChanged(user?: unknown): void {
+    const u = user !== undefined ? user : this.callbacks.getUser();
+    this.sendEvent('userChanged', u);
+  }
+
+  /**
+   * Notify apps of network changes
+   */
+  notifyNetworkChanged(): void {
+    const network = this.callbacks.getNetwork();
+    this.sendEvent('networkChanged', network);
   }
 
   /**
@@ -733,7 +765,7 @@ export class WalletBridge {
    * Cleanup
    */
   destroy(): void {
-    window.removeEventListener('message', this.handleMessage.bind(this));
+    window.removeEventListener('message', this.boundHandleMessage);
     this.iframeRefs.clear();
   }
 }

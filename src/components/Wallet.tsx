@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Wallet as WalletIcon } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { TokenIcon } from '../TokenIcon';
+import { fetchPrices, getPrice, getPortfolioValue } from '../priceService';
 
 interface Asset {
   id?: string;
@@ -120,6 +121,15 @@ export default function Wallet({
   const [showAllTransactions, setShowAllTransactions] = useState(false);
   const [txChainFilter, setTxChainFilter] = useState<string>('all');
 
+  const [, setPriceTick] = useState(0);
+
+  // Fetch USD prices when assets change
+  useEffect(() => {
+    if (assets.length > 0) {
+      fetchPrices(assets.map(a => a.symbol)).then(() => setPriceTick(t => t + 1));
+    }
+  }, [assets]);
+
   // Handle scanned address from parent
   useEffect(() => {
     if (scannedAddress) {
@@ -168,13 +178,13 @@ export default function Wallet({
               </div>
               <div className="wallet-actions">
                 <button onClick={onSettings} className="btn-icon btn-settings" title="Settings">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
                     <circle cx="12" cy="12" r="3"/>
                   </svg>
                 </button>
                 <button onClick={onLogout} className="btn-icon btn-logout" title="Logout">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
                     <polyline points="16 17 21 12 16 7"/>
                     <line x1="21" y1="12" x2="9" y2="12"/>
@@ -182,6 +192,13 @@ export default function Wallet({
                 </button>
               </div>
             </div>
+
+            {/* Portfolio Value */}
+            {assets.length > 0 && (
+              <div className="wallet-portfolio-value">
+                ${getPortfolioValue(assets).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            )}
 
             {/* Tab Bar */}
             <div className="wallet-tabs">
@@ -203,14 +220,6 @@ export default function Wallet({
                     <button onClick={onAddAsset} className="btn-add" title="Add Custom Asset">+</button>
                     <button onClick={onRefresh} className="btn-refresh" title="Refresh">↻</button>
                   </>
-                )}
-                {activeTab === 'transactions' && transactionPagination && transactionPagination.total > 10 && (
-                  <button
-                    className="btn-view-all"
-                    onClick={() => setShowAllTransactions(true)}
-                  >
-                    View All
-                  </button>
                 )}
               </div>
             </div>
@@ -251,7 +260,7 @@ export default function Wallet({
                           <div className="asset-chains">
                             {asset.chains && asset.chains.length > 0 ? (
                               asset.chains.map(c => (
-                                <span key={c.chainType} className="chain-badge">{c.chain}</span>
+                                <span key={c.chain} className="chain-badge">{c.chain}</span>
                               ))
                             ) : (
                               asset.chain && <span className="chain-badge">{asset.chain}</span>
@@ -262,6 +271,9 @@ export default function Wallet({
                       </div>
                       <div className="asset-row-right">
                         <div className="balance-with-tooltip">
+                          <span className="asset-value-usd">
+                            ${getPrice(asset.symbol).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
                           <span className="asset-balance">{asset.balance.toFixed(4)} {asset.symbol}</span>
                           {asset.chainBalances && Object.keys(asset.chainBalances).length > 1 && (
                             <div className="balance-tooltip">
@@ -333,6 +345,9 @@ export default function Wallet({
                 <div>
                   <h3>{selectedAsset.name}</h3>
                   <span className="asset-balance-display">{selectedAsset.balance.toFixed(4)} {selectedAsset.symbol}</span>
+                  <span className="asset-value-usd modal">
+                    ${(selectedAsset.balance * getPrice(selectedAsset.symbol)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
                 </div>
               </div>
               <button onClick={() => { setSelectedAsset(null); setSelectedChain(null); }} className="asset-modal-close">✕</button>

@@ -29,10 +29,28 @@ VALUES
   ('usdt-sol', 'usdt', 'Solana', 'svm', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', 6, 1),
   ('usdt-ton', 'usdt', 'TON', 'ton', 'EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs', 6, 1);
 
--- ETH on Base
+-- Testnet USDC (official Circle testnet deployments)
+INSERT OR IGNORE INTO asset_chains (id, asset_id, chain, chain_type, contract_address, decimals, network, is_enabled)
+VALUES
+  ('usdc-eth-testnet', 'usdc', 'Ethereum', 'evm', '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', 6, 'testnet', 1),
+  ('usdc-base-testnet', 'usdc', 'Base', 'evm', '0x036CbD53842c5426634e7929541eC2318f3dCF7e', 6, 'testnet', 1),
+  ('usdc-sol-testnet', 'usdc', 'Solana', 'svm', '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', 6, 'testnet', 1);
+
+-- Testnet USDT (community test tokens)
+INSERT OR IGNORE INTO asset_chains (id, asset_id, chain, chain_type, contract_address, decimals, network, is_enabled)
+VALUES
+  ('usdt-eth-testnet', 'usdt', 'Ethereum', 'evm', '0x7169D38820dfd117C3FA1f22a697dBA58d90BA06', 6, 'testnet', 1),
+  ('usdt-tron-testnet', 'usdt', 'Tron', 'tron', 'TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs', 6, 'testnet', 1);
+
+-- ETH on Base (mainnet + testnet)
 INSERT OR IGNORE INTO asset_chains (id, asset_id, chain, chain_type, contract_address, decimals, is_enabled)
 VALUES
   ('eth-base', 'eth', 'Base', 'evm', NULL, 18, 1);
+
+INSERT OR IGNORE INTO asset_chains (id, asset_id, chain, chain_type, contract_address, decimals, network, is_enabled)
+VALUES
+  ('eth-testnet', 'eth', 'Ethereum', 'evm', NULL, 18, 'testnet', 1),
+  ('eth-base-testnet', 'eth', 'Base', 'evm', NULL, 18, 'testnet', 1);
 
 -- Default RPC Endpoints (ZAN API - Mainnet)
 INSERT OR IGNORE INTO rpc_endpoints (id, chain_type, chain_name, chain_id, network, name, rpc_url, priority, is_enabled)
