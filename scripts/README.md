@@ -96,7 +96,8 @@ src/themes/
 ├── orange.css
 ├── green.css
 ├── rose.css
-└── slate.css
+├── slate.css
+└── light.css
 ```
 
 Each theme file defines CSS variables like `--primary`, `--accent-bg`, etc.
@@ -127,8 +128,11 @@ Edit `wrangler.toml` to change:
 | `SPLICE_PORT` | `443` | Splice API port |
 | `CANTON_JSON_PORT` | `443` | JSON API port |
 | `CANTON_AUTH_USER` | `ledger-api-user` | Auth username |
-| `THEME` | `purple` | UI theme |
+| `THEME` | `purple` | UI theme (purple/teal/blue/orange/green/rose/slate) |
 | `ORG_NAME` | Instance name | Organization name in UI |
+| `PUBLIC_PARTY` | *(none)* | Canton public party ID for contract exercises |
+| `CHAT_AGENT_WEBHOOK_URL` | *(none)* | Webhook URL for chat agent integration |
+| `MPC_AUTH_SECRET` | *(none)* | Auth secret for MPC signer (requires MPC service binding) |
 
 ## Manual Setup (Alternative)
 
@@ -188,6 +192,18 @@ wrangler d1 execute wallet-myinstance --remote --file=scripts/seed-data.sql
 npm run build
 wrangler pages deploy dist --project-name=wallet-myinstance
 ```
+
+## MPC Signer (Optional)
+
+If you enable MPC signing, you also need to deploy the MPC signer worker separately:
+
+```bash
+cd workers/mpc-signer
+npm install
+wrangler deploy
+```
+
+The MPC signer worker uses Durable Objects for key storage. Make sure the service name in its `wrangler.toml` matches the `[[services]]` binding in your instance's `wrangler.toml`.
 
 ## Troubleshooting
 

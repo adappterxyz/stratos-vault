@@ -27,5 +27,19 @@ RP_ID = "YOUR_DOMAIN"                      # e.g., "wallet.example.com"
 RP_NAME = "Your Wallet Name"               # Display name for WebAuthn
 
 # UI Configuration
-THEME = "purple"                           # "purple" or "teal"
+THEME = "purple"                           # purple, teal, blue, orange, green, rose, slate
 ORG_NAME = "Your Organization"             # Displayed in the UI
+
+# Optional: Canton public party ID (used for contract exercises)
+# PUBLIC_PARTY = "publicParty::YOUR_PUBLIC_PARTY_ID"
+
+# Optional: Chat agent webhook URL
+# CHAT_AGENT_WEBHOOK_URL = "https://your-chat-agent-webhook-url"
+
+# Optional: MPC auth secret (required when MPC signer is enabled)
+# MPC_AUTH_SECRET = "YOUR_MPC_SECRET"
+
+# Optional: MPC Signer Service Binding (uncomment to enable MPC signing)
+# [[services]]
+# binding = "MPC_SIGNER"
+# service = "stratos-mpc-signer"
